@@ -16,8 +16,7 @@ warnings.filterwarnings('ignore')
 # 1. 페이지 설정
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Pro Quant Ultimate",
-    page_icon="💎",
+    page_title="Pair Trading System",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -30,7 +29,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("💎 Pro Quant Ultimate Dashboard")
+st.title("Pair Trading System Dashboard")
 
 # ---------------------------------------------------------
 # 2. 사이드바 (전략 및 유니버스 선택)
@@ -68,8 +67,8 @@ with st.sidebar:
     if app_mode.startswith("🔙"):
         st.header("📅 Backtest Period")
         c1, c2 = st.columns(2)
-        start_input = c1.date_input("Start", datetime(2023, 1, 1))
-        end_input = c2.date_input("End", datetime(2023, 12, 31))
+        start_input = c1.date_input("Start", datetime(2025, 1, 1))
+        end_input = c2.date_input("End", datetime(2025, 12, 31))
         run_label = "RUN BACKTEST"
     else:
         end_input = datetime.now()
