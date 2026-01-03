@@ -23,23 +23,18 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 모던하고 깔끔한 CSS (불필요한 장식 제거)
+# 모던하고 깔끔한 CSS
 st.markdown("""
 <style>
-    /* 전체 폰트 및 배경 (차분한 다크 그레이) */
     .stApp {
         background-color: #1A1C24;
         color: #E0E0E0;
         font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, Roboto, sans-serif;
     }
-    
-    /* 사이드바 */
     section[data-testid="stSidebar"] {
         background-color: #111317;
         border-right: 1px solid #2B2D35;
     }
-    
-    /* 카드 스타일 (심플하게) */
     div[data-testid="metric-container"] {
         background-color: #252830;
         border: 1px solid #363945;
@@ -47,8 +42,6 @@ st.markdown("""
         padding: 15px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    
-    /* 버튼 스타일 (절제된 블루) */
     div.stButton > button {
         background-color: #3B82F6;
         color: white;
@@ -62,31 +55,10 @@ st.markdown("""
         background-color: #2563EB;
         box-shadow: 0 4px 6px rgba(0,0,0,0.2);
     }
-    
-    /* 헤더 스타일 */
     h1, h2, h3 {
         color: #F3F4F6 !important;
         font-weight: 700 !important;
     }
-    
-    /* 탭 스타일 */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 20px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        white-space: pre-wrap;
-        background-color: transparent;
-        border-radius: 4px;
-        color: #9CA3AF;
-        font-weight: 600;
-    }
-    .stTabs [aria-selected="true"] {
-        color: #3B82F6;
-        background-color: #1F2937;
-    }
-    
-    /* Expander 깔끔하게 */
     .streamlit-expanderHeader {
         background-color: #252830;
         border-radius: 4px;
@@ -99,12 +71,11 @@ st.title("Pair Trading Scanner")
 st.markdown("데이터 기반의 롱숏(Long-Short) 기회 포착 및 백테스팅")
 
 # ---------------------------------------------------------
-# 2. 직관적인 사이드바 (복잡한건 숨김)
+# 2. 직관적인 사이드바
 # ---------------------------------------------------------
 with st.sidebar:
     st.header("설정 (Settings)")
     
-    # 1. 대상 선택
     universe_mode = st.selectbox(
         "분석 대상 그룹",
         ["KOSPI 200 (선물/헷지)", "시가총액 상위 100 (Long Only)"]
@@ -112,15 +83,12 @@ with st.sidebar:
     
     st.divider()
     
-    # 2. 모드 선택
     app_mode = st.radio("실행 모드", ["실시간 분석 (Live)", "백테스트 (Backtest)"])
 
     st.divider()
     
-    # 3. 기본 파라미터 (필수)
     total_capital = st.number_input("투자 원금 (KRW)", value=10000000, step=1000000, format="%d")
     
-    # 4. 고급 파라미터 (숨김 처리)
     with st.expander("⚙️ 고급 설정 (민감도 조절)"):
         st.caption("익숙하지 않다면 기본값을 추천합니다.")
         window_size = st.slider("분석 기간 (Window)", 20, 120, 60)
@@ -133,7 +101,6 @@ with st.sidebar:
 
     st.divider()
     
-    # 5. 기간 설정 및 실행
     if app_mode == "백테스트 (Backtest)":
         st.subheader("검증 기간")
         c1, c2 = st.columns(2)
@@ -141,7 +108,6 @@ with st.sidebar:
         end_input = c2.date_input("종료일", datetime(2025, 12, 31))
         run_label = "백테스트 실행"
     else:
-        # Live 모드는 최근 1년 자동 설정
         end_input = datetime.now()
         start_input = end_input - timedelta(days=365)
         run_label = "분석 시작"
@@ -149,11 +115,10 @@ with st.sidebar:
     run_btn = st.button(run_label, type="primary", use_container_width=True)
 
 # ---------------------------------------------------------
-# 3. 데이터 로딩 (한글 종목명 + 코드 정리)
+# 3. 데이터 로딩
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_stock_data(universe_type, start_date, end_date):
-    # KOSPI 200 선물 가능 (한글)
     tickers_futures = {
         '005930.KS': '삼성전자', '000660.KS': 'SK하이닉스', '005380.KS': '현대차', 
         '000270.KS': '기아', '005490.KS': 'POSCO홀딩스', '006400.KS': '삼성SDI', 
@@ -170,7 +135,6 @@ def load_stock_data(universe_type, start_date, end_date):
         '247540.KQ': '에코프로비엠', '086520.KQ': '에코프로', '028300.KQ': 'HLB'
     }
 
-    # 시총 상위 (한글)
     tickers_massive = tickers_futures.copy()
     additional = {
         '373220.KS': 'LG에너지솔루션', '207940.KS': '삼성바이오로직스', '068270.KS': '셀트리온', 
@@ -194,7 +158,6 @@ def load_stock_data(universe_type, start_date, end_date):
     tickers_list = list(manual_tickers.keys())
     all_data_list = []
     
-    # 심플한 로딩 메시지
     status_placeholder = st.empty()
     status_placeholder.info(f"데이터 불러오는 중 ({len(tickers_list)} 종목)...")
     
@@ -202,7 +165,6 @@ def load_stock_data(universe_type, start_date, end_date):
     for i in range(0, len(tickers_list), chunk_size):
         chunk = tickers_list[i:i + chunk_size]
         try:
-            # 너무 자주 바뀌는 텍스트는 시각적으로 피곤하므로 생략하거나 최소화
             df_chunk = yf.download(chunk, start=fetch_start, end=fetch_end, progress=False)['Close']
             if isinstance(df_chunk, pd.Series): df_chunk = df_chunk.to_frame(name=chunk[0])
             all_data_list.append(df_chunk)
@@ -220,7 +182,7 @@ def load_stock_data(universe_type, start_date, end_date):
     return pd.DataFrame(), manual_tickers
 
 # ---------------------------------------------------------
-# 4. 분석 로직 (기존 로직 유지)
+# 4. 분석 로직
 # ---------------------------------------------------------
 def run_analysis(df_prices, window, entry_thresh, exit_thresh, stop_loss, p_cutoff, mode, start, end):
     pairs = []
@@ -230,7 +192,6 @@ def run_analysis(df_prices, window, entry_thresh, exit_thresh, stop_loss, p_cuto
 
     target_mask = (df_prices.index >= pd.to_datetime(start)) & (df_prices.index <= pd.to_datetime(end))
     
-    # 진행바
     prog_bar = st.progress(0, text="시장 데이터를 스캔하고 있습니다...")
     checked = 0
     total_checks = len(cols) * (len(cols) - 1) // 2
@@ -309,11 +270,14 @@ def run_analysis(df_prices, window, entry_thresh, exit_thresh, stop_loss, p_cuto
     return pd.DataFrame(pairs)
 
 # ---------------------------------------------------------
-# 5. 시각화 (깔끔한 모던 스타일)
+# 5. 시각화 (타이틀 추가)
 # ---------------------------------------------------------
 def plot_chart(row, df_prices, entry, exit, stop, mode):
     sa, sb = row['Stock A'], row['Stock B']
     dates = row['Analysis_Dates']
+    
+    # [NEW] 한글 종목명 형식의 타이틀 생성
+    title_text = f"{sa} vs {sb} 상세 분석"
     
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.25, 0.25])
     
@@ -336,10 +300,31 @@ def plot_chart(row, df_prices, entry, exit, stop, mode):
         fig.add_trace(go.Scatter(x=dates, y=cum, name='수익률 %', line=dict(color='#10B981', width=1.5), fill='tozeroy'), row=3, col=1)
 
     fig.update_layout(
-        height=550, hovermode="x unified", template="plotly_dark",
-        margin=dict(l=10, r=10, t=30, b=10), showlegend=True,
-        plot_bgcolor='#1A1C24', paper_bgcolor='#1A1C24', # 차트 배경색 앱과 통일
+        title=dict(text=title_text, font=dict(size=20, color="white")), # [NEW] 타이틀 추가
+        height=600, hovermode="x unified", template="plotly_dark",
+        margin=dict(l=10, r=10, t=50, b=10), showlegend=True,
+        plot_bgcolor='#1A1C24', paper_bgcolor='#1A1C24',
         font=dict(family="Pretendard, sans-serif")
+    )
+    return fig
+
+# [NEW] 히트맵 차트 함수 추가
+def plot_heatmap(results):
+    if results.empty: return None
+    top_pairs = results.sort_values(by='Z-Score', key=abs, ascending=False).head(10)
+    data = []
+    for idx, row in top_pairs.iterrows():
+        data.append({'Pair': f"{row['Stock A']}/{row['Stock B']}", 'Z-Score': row['Z-Score']})
+    
+    df_heat = pd.DataFrame(data)
+    fig = go.Figure(data=go.Heatmap(
+        z=df_heat['Z-Score'], x=df_heat['Pair'], y=['괴리율 강도'],
+        colorscale='Blues', zmid=0
+    ))
+    fig.update_layout(
+        title=dict(text="상위 페어 괴리율 히트맵", font=dict(size=16, color="white")),
+        height=300, template="plotly_dark", 
+        plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
     )
     return fig
 
@@ -356,7 +341,6 @@ if run_btn:
     else:
         results = run_analysis(df_prices, window_size, entry_z, exit_z, stop_loss_z, p_cutoff, app_mode, start_input, end_input)
         
-        # [Helper] 이름+코드 포맷터 (깔끔하게)
         def fmt(name):
             full_code = name_to_code.get(name, 'Unknown')
             clean_code = full_code.split('.')[0]
@@ -367,7 +351,6 @@ if run_btn:
             st.caption("Tip: '설정 더보기'에서 P-value를 조금 높여보세요.")
         else:
             if app_mode == "백테스트 (Backtest)":
-                # --- 포트폴리오 결과 ---
                 st.subheader("📊 포트폴리오 성과 리포트")
                 
                 all_ret = pd.DataFrame(index=pd.date_range(start=start_input, end=end_input))
@@ -383,31 +366,30 @@ if run_btn:
                 total_ret = port_cum.iloc[-1]
                 mdd = ((1 + port_daily).cumprod() / (1 + port_daily).cumprod().expanding().max() - 1).min()
 
-                # 심플한 카드형 메트릭
                 c1, c2, c3 = st.columns(3)
                 c1.metric("총 수익률", f"{total_ret*100:.2f}%")
                 c2.metric("최대 낙폭 (MDD)", f"{mdd*100:.2f}%")
                 c3.metric("매매 페어 수", f"{len(results)}개")
                 
-                # 수익률 차트
                 fig_eq = go.Figure()
                 fig_eq.add_trace(go.Scatter(x=port_cum.index, y=port_cum*100, mode='lines', name='내 계좌', line=dict(color='#10B981', width=2)))
-                fig_eq.update_layout(title="계좌 수익률 곡선", template="plotly_dark", height=350, plot_bgcolor='#1A1C24', paper_bgcolor='#1A1C24')
+                fig_eq.update_layout(title="포트폴리오 누적 수익률", template="plotly_dark", height=350, plot_bgcolor='#1A1C24', paper_bgcolor='#1A1C24')
                 st.plotly_chart(fig_eq, use_container_width=True)
 
+                st.plotly_chart(plot_heatmap(results), use_container_width=True)
+
                 st.markdown("---")
-                st.subheader("🏆 베스트 퍼포머 (Top 5)")
+                st.subheader("🏆 Best Performers (Top 5)")
                 for idx, row in results.sort_values('Final_Ret', ascending=False).head(5).iterrows():
                     with st.expander(f"🟢 {fmt(row['Stock A'])} / {fmt(row['Stock B'])} (수익률: {row['Final_Ret']*100:.1f}%)"):
                         st.plotly_chart(plot_chart(row, df_prices, entry_z, exit_z, stop_loss_z, app_mode), use_container_width=True)
                 
-                st.subheader("📉 워스트 퍼포머 (Risk Check)")
+                st.subheader("Bad Guys (Worst)")
                 for idx, row in results.sort_values('Final_Ret', ascending=True).head(3).iterrows():
                     with st.expander(f"🔴 {fmt(row['Stock A'])} / {fmt(row['Stock B'])} (손실: {row['Final_Ret']*100:.1f}%)"):
                         st.plotly_chart(plot_chart(row, df_prices, entry_z, exit_z, stop_loss_z, app_mode), use_container_width=True)
 
             else:
-                # --- 실시간 모니터 ---
                 actives = results[results['Status'] != 'Watch']
                 col1, col2 = st.columns([3, 1])
                 with col1: st.subheader("실시간 시장 스캐너")
@@ -438,11 +420,11 @@ if run_btn:
                         st.info("현재 진입 조건(Z-Score)을 만족하는 종목이 없습니다.")
                 
                 with tab2:
+                    st.plotly_chart(plot_heatmap(results), use_container_width=True)
                     df_disp = results[['Stock A', 'Stock B', 'Z-Score', 'P-value', 'Corr']].copy()
                     df_disp['Stock A'] = df_disp['Stock A'].apply(fmt)
                     df_disp['Stock B'] = df_disp['Stock B'].apply(fmt)
                     df_disp.columns = ['종목 A', '종목 B', '괴리율(Z)', '유의확률(P)', '상관계수']
                     st.dataframe(df_disp.sort_values('괴리율(Z)', key=abs, ascending=False), use_container_width=True)
 else:
-    # 초기 화면 안내
     st.info("👈 사이드바에서 설정을 확인하고 [분석 시작] 버튼을 눌러주세요.")
