@@ -22,28 +22,20 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 깔끔하고 전문적인 UI를 위한 커스텀 CSS
 st.markdown("""
 <style>
-    /* 메트릭 카드 스타일 */
     div[data-testid="metric-container"] {
         background-color: #f9f9f9;
         border: 1px solid #e0e0e0;
         padding: 15px;
         border-radius: 8px;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
     }
-    /* 다크모드 대응 */
     @media (prefers-color-scheme: dark) {
         div[data-testid="metric-container"] {
             background-color: #262730;
             border: 1px solid #41424b;
         }
     }
-    /* 헤더 간격 조정 */
-    h1 { margin-bottom: 20px; font-size: 2.2rem; }
-    h2 { margin-top: 30px; font-size: 1.5rem; border-bottom: 1px solid #ddd; padding-bottom: 10px; }
-    h3 { margin-top: 20px; font-size: 1.2rem; font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -55,7 +47,6 @@ st.title("📊 Pairs Trading Strategy Dashboard")
 with st.sidebar:
     st.header("Settings")
     
-    # Universe Selection (깔끔한 텍스트로 변경)
     universe_mode = st.selectbox(
         "Target Universe",
         ["Futures / Hedge (KOSPI 200)", "Large Cap (Top 100)"]
@@ -63,12 +54,10 @@ with st.sidebar:
     
     st.divider()
     
-    # Mode Selection
     app_mode = st.radio("Analysis Mode", ["Live Analysis", "Backtest"])
 
     st.divider()
     
-    # Parameters
     st.subheader("Parameters")
     total_capital = st.number_input("Capital (KRW)", value=10000000, step=1000000, format="%d")
     window_size = st.slider("Rolling Window", 20, 120, 60)
@@ -79,11 +68,9 @@ with st.sidebar:
 
     st.divider()
     
-    # Date Picker (요청하신 2025년 기본 설정)
     if app_mode == "Backtest":
         st.subheader("Period")
         c1, c2 = st.columns(2)
-        # Default: 2025.01.01 ~ 2025.12.31
         start_input = c1.date_input("Start", datetime(2025, 1, 1))
         end_input = c2.date_input("End", datetime(2025, 12, 31))
         run_label = "Run Backtest"
@@ -95,11 +82,11 @@ with st.sidebar:
     run_btn = st.button(run_label, type="primary", use_container_width=True)
 
 # ---------------------------------------------------------
-# 3. Data Loading (Robust Chunking)
+# 3. Data Loading (Return Ticker Map)
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_stock_data(universe_type, start_date, end_date):
-    # KOSPI 200 선물 가능 종목 (주요 종목)
+    # KOSPI 200 선물 가능 종목
     tickers_futures = {
         '005930.KS': 'Samsung Elec', '000660.KS': 'SK Hynix', '005380.KS': 'Hyundai Motor', 
         '000270.KS': 'Kia', '005490.KS': 'POSCO Holdings', '006400.KS': 'Samsung SDI', 
@@ -141,14 +128,12 @@ def load_stock_data(universe_type, start_date, end_date):
     else:
         manual_tickers = tickers_futures
 
-    # 데이터 확보 기간 (분석일보다 1년 전부터)
     fetch_start = (pd.to_datetime(start_date) - timedelta(days=365)).strftime('%Y-%m-%d')
     fetch_end = pd.to_datetime(end_date).strftime('%Y-%m-%d')
     
     tickers_list = list(manual_tickers.keys())
     all_data_list = []
     
-    # 깔끔한 상태 표시
     status_placeholder = st.empty()
     status_placeholder.info(f"Downloading data for {len(tickers_list)} stocks...")
     
@@ -166,15 +151,13 @@ def load_stock_data(universe_type, start_date, end_date):
     
     if all_data_list:
         df_final = pd.concat(all_data_list, axis=1)
-        # 영문명으로 매핑 (그래프가 더 깔끔함)
         df_final = df_final.rename(columns=manual_tickers)
+        df_final = df_final.ffill().bfill().dropna(axis=1, how='any')
         
-        # 보존율 높이기 (ffill -> bfill -> dropna column-wise)
-        df_final = df_final.ffill().bfill()
-        df_final = df_final.dropna(axis=1, how='any')
-        
-        return df_final
-    return pd.DataFrame()
+        # [NEW] Return both DataFrame and Ticker Map (for code lookup)
+        return df_final, manual_tickers
+    
+    return pd.DataFrame(), manual_tickers
 
 # ---------------------------------------------------------
 # 4. Analysis Engine
@@ -183,27 +166,21 @@ def run_analysis(df_prices, window, threshold, p_cutoff, mode, start, end):
     pairs = []
     cols = df_prices.columns
     
-    # 데이터 길이 체크
     if len(df_prices) < window: return pd.DataFrame()
 
     total_checks = len(cols) * (len(cols) - 1) // 2
-    
-    # 백테스팅 타겟 마스크
     target_mask = (df_prices.index >= pd.to_datetime(start)) & (df_prices.index <= pd.to_datetime(end))
     
     for i in range(len(cols)):
         for j in range(i + 1, len(cols)):
             sa, sb = cols[i], cols[j]
             
-            # Correlation Check (Speed)
             if df_prices[sa].corr(df_prices[sb]) < 0.5: continue
                 
             try:
-                # 1. Cointegration (Full Data)
                 score, pval, _ = coint(df_prices[sa], df_prices[sb])
                 
                 if pval < p_cutoff:
-                    # 2. Z-Score Calculation
                     log_a, log_b = np.log(df_prices[sa]), np.log(df_prices[sb])
                     spread = log_a - log_b
                     
@@ -211,7 +188,6 @@ def run_analysis(df_prices, window, threshold, p_cutoff, mode, start, end):
                     std = spread.rolling(window).std()
                     z_all = (spread - mean) / std
                     
-                    # 3. Strategy Simulation (Target Period)
                     z_target = z_all.loc[target_mask]
                     if z_target.empty: continue
                     
@@ -220,11 +196,9 @@ def run_analysis(df_prices, window, threshold, p_cutoff, mode, start, end):
                     ret_a = df_prices[sa].loc[target_mask].pct_change().fillna(0)
                     ret_b = df_prices[sb].loc[target_mask].pct_change().fillna(0)
                     
-                    # Spread Return (Shifted)
                     spr_ret = (ret_a - ret_b) * pd.Series(pos).shift(1).fillna(0).values
                     cum_ret = (1 + spr_ret).cumprod() - 1
                     
-                    # Live Status
                     curr_z = z_all.iloc[-1]
                     status = "Watch"
                     if curr_z < -threshold: status = "Buy A"
@@ -255,16 +229,13 @@ def plot_chart(row, df_prices, threshold, mode):
     fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.05,
                         subplot_titles=("Price Action", "Strategy Return", "Spread Z-Score") if rows==3 else ("Price Action", "Spread Z-Score"))
     
-    # 1. Price
     pa, pb = df_prices[sa].loc[dates], df_prices[sb].loc[dates]
     fig.add_trace(go.Scatter(x=dates, y=(pa/pa.iloc[0])*100, name=sa, line=dict(color='#2962FF', width=1.5)), row=1, col=1)
     fig.add_trace(go.Scatter(x=dates, y=(pb/pb.iloc[0])*100, name=sb, line=dict(color='#FF6D00', width=1.5)), row=1, col=1)
     
-    # 2. Return
     if rows == 3:
         fig.add_trace(go.Scatter(x=dates, y=row['Cum_Ret_Series']*100, name='Return %', line=dict(color='#00C853', width=1.5), fill='tozeroy'), row=2, col=1)
     
-    # 3. Z-Score
     z_row = rows
     z_vals = ((row['Spread'] - row['Mean']) / row['Std']).loc[dates]
     fig.add_trace(go.Scatter(x=dates, y=z_vals, name='Z-Score', line=dict(color='#6200EA', width=1)), row=z_row, col=1)
@@ -279,24 +250,31 @@ def plot_chart(row, df_prices, threshold, mode):
 # ---------------------------------------------------------
 if run_btn:
     with st.spinner("Analyzing market data..."):
-        df_prices = load_stock_data(universe_mode, start_input, end_input)
+        # [NEW] Unpack Ticker Map
+        df_prices, ticker_map = load_stock_data(universe_mode, start_input, end_input)
+        
+        # Reverse Map for Code Lookup: Name -> Code
+        name_to_code = {v: k for k, v in ticker_map.items()}
 
     if df_prices.empty or len(df_prices.columns) < 2:
         st.error("Data Load Error. Please try again.")
     else:
         results = run_analysis(df_prices, window_size, z_threshold, p_cutoff, app_mode, start_input, end_input)
         
+        # [Helper] Name Formatting with Code
+        def fmt_name(name):
+            code = name_to_code.get(name, "Unknown")
+            return f"{name} ({code})"
+
         if results.empty:
             st.warning("No cointegrated pairs found matching your criteria.")
-            st.caption("Tip: Try increasing 'Max P-value' to 0.15")
         else:
             if app_mode == "Backtest":
                 # ==========================
-                # Portfolio Backtest Result
+                # Portfolio Backtest
                 # ==========================
                 st.subheader("📊 Portfolio Performance Report")
                 
-                # Portfolio Calculation
                 all_returns_df = pd.DataFrame(index=pd.date_range(start=start_input, end=end_input))
                 for idx, row in results.iterrows():
                     series = row['Daily_Ret_Series']
@@ -308,18 +286,15 @@ if run_btn:
                 portfolio_daily_ret = all_returns_df.mean(axis=1).fillna(0)
                 portfolio_cum_ret = (1 + portfolio_daily_ret).cumprod() - 1
                 
-                # MDD
                 wealth = (1 + portfolio_daily_ret).cumprod()
                 peak = wealth.expanding(min_periods=1).max()
                 mdd = ((wealth - peak) / peak).min()
 
-                # Metrics Row
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Total Return", f"{portfolio_cum_ret.iloc[-1]*100:.2f}%")
                 m2.metric("Max Drawdown", f"{mdd*100:.2f}%")
                 m3.metric("Pairs Traded", f"{len(results)}")
                 
-                # Main Chart
                 fig_port = go.Figure()
                 fig_port.add_trace(go.Scatter(x=portfolio_cum_ret.index, y=portfolio_cum_ret*100, mode='lines', name='Equity', line=dict(color='#00C853', width=2), fill='tozeroy'))
                 fig_port.update_layout(title="Portfolio Equity Curve", yaxis_title="Return (%)", hovermode="x unified", height=400, template="plotly_white")
@@ -328,56 +303,81 @@ if run_btn:
                 st.markdown("---")
                 st.subheader("🏆 Top Performing Pairs")
                 for idx, row in results.sort_values('Final_Ret', ascending=False).head(5).iterrows():
-                    with st.expander(f"Return: {row['Final_Ret']*100:.2f}% | {row['Stock A']} vs {row['Stock B']}", expanded=False):
+                    # Format Name with Code
+                    sa_disp = fmt_name(row['Stock A'])
+                    sb_disp = fmt_name(row['Stock B'])
+                    
+                    with st.expander(f"Return: {row['Final_Ret']*100:.2f}% | {sa_disp} vs {sb_disp}", expanded=False):
                         st.plotly_chart(plot_chart(row, df_prices, z_threshold, app_mode), use_container_width=True)
 
             else:
                 # ==========================
-                # Live Analysis Result
+                # Live Analysis (with Watchlist Tab)
                 # ==========================
                 actives = results[results['Status'] != 'Watch']
-                st.subheader("📡 Live Signals")
+                st.subheader("📡 Live Market Analysis")
                 
                 c1, c2 = st.columns(2)
                 c1.metric("Total Pairs", f"{len(results)}")
                 c2.metric("Active Signals", f"{len(actives)}", delta="Action Required")
                 
-                st.markdown("---")
+                st.divider()
                 
-                if not actives.empty:
-                    for idx, row in actives.sort_values(by='Z-Score', key=abs, ascending=False).iterrows():
-                        # Sizing
-                        alloc = total_capital / 2
-                        qa = int(alloc / row['Price A'])
-                        qb = int(alloc / row['Price B'])
-                        sa, sb = row['Stock A'], row['Stock B']
-                        
-                        # Professional Signal Display
-                        is_hedge = "Futures" in universe_mode
-                        
-                        if row['Status'] == "Buy A":
-                            # A is cheap
-                            side_a, side_b = ("Long", "Short") if is_hedge else ("Buy", "Avoid")
-                            clr = "green"
-                        else:
-                            # B is cheap
-                            side_a, side_b = ("Short", "Long") if is_hedge else ("Avoid", "Buy")
-                            clr = "green"
-                        
-                        with st.expander(f"Signal: {sa} vs {sb} (Z: {row['Z-Score']:.2f})", expanded=True):
-                            c_left, c_right = st.columns(2)
-                            c_left.markdown(f"**{sa}**")
-                            c_left.caption(f"{side_a} {qa:,} shares")
+                # [NEW] Tabs for Signals and Watchlist
+                tab1, tab2 = st.tabs(["🔥 Active Signals", "👀 Watchlist"])
+                
+                with tab1:
+                    if not actives.empty:
+                        for idx, row in actives.sort_values(by='Z-Score', key=abs, ascending=False).iterrows():
+                            # Sizing
+                            alloc = total_capital / 2
+                            qa = int(alloc / row['Price A'])
+                            qb = int(alloc / row['Price B'])
                             
-                            c_right.markdown(f"**{sb}**")
-                            c_right.caption(f"{side_b} {qb:,} shares")
+                            # Names with codes
+                            sa_disp = fmt_name(row['Stock A'])
+                            sb_disp = fmt_name(row['Stock B'])
                             
-                            st.plotly_chart(plot_chart(row, df_prices, z_threshold, app_mode), use_container_width=True)
-                else:
-                    st.info("No active signals at the moment.")
-                    st.caption("All pairs are currently trading within the normal range.")
+                            is_hedge = "Futures" in universe_mode
+                            
+                            if row['Status'] == "Buy A":
+                                side_a, side_b = ("Long", "Short") if is_hedge else ("Buy", "Avoid")
+                                clr = "green"
+                            else:
+                                side_a, side_b = ("Short", "Long") if is_hedge else ("Avoid", "Buy")
+                                clr = "green"
+                            
+                            with st.expander(f"Signal: {sa_disp} vs {sb_disp} (Z: {row['Z-Score']:.2f})", expanded=True):
+                                c_left, c_right = st.columns(2)
+                                c_left.markdown(f"**{sa_disp}**")
+                                c_left.caption(f"{side_a} {qa:,} shares")
+                                
+                                c_right.markdown(f"**{sb_disp}**")
+                                c_right.caption(f"{side_b} {qb:,} shares")
+                                
+                                st.plotly_chart(plot_chart(row, df_prices, z_threshold, app_mode), use_container_width=True)
+                    else:
+                        st.info("No active signals at the moment.")
+                        st.caption("All tracked pairs are currently within their normal statistical range.")
+
+                with tab2:
+                    st.markdown("### 📋 Full Watchlist (All Cointegrated Pairs)")
                     
-                    with st.expander("View Watchlist"):
-                        st.dataframe(results[['Stock A', 'Stock B', 'Z-Score', 'P-value', 'Corr']].sort_values('P-value'))
+                    # Watchlist Dataframe Preparation
+                    watch_df = results.copy()
+                    
+                    # Apply Name Formatting
+                    watch_df['Stock A'] = watch_df['Stock A'].apply(fmt_name)
+                    watch_df['Stock B'] = watch_df['Stock B'].apply(fmt_name)
+                    
+                    # Columns to display
+                    display_cols = ['Stock A', 'Stock B', 'Z-Score', 'P-value', 'Corr', 'Status']
+                    
+                    # Display with style
+                    st.dataframe(
+                        watch_df[display_cols].sort_values(by='Z-Score', key=abs, ascending=False),
+                        use_container_width=True,
+                        height=600
+                    )
 else:
     st.info("Please select settings and click Run.")
