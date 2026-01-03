@@ -60,9 +60,9 @@ with st.sidebar:
         st.header("📅 Backtest Period")
         col1, col2 = st.columns(2)
         with col1:
-            start_date_input = st.date_input("Start Date", datetime(2023, 1, 1))
+            start_date_input = st.date_input("Start Date", datetime(2025, 1, 1))
         with col2:
-            end_date_input = st.date_input("End Date", datetime(2023, 12, 31))
+            end_date_input = st.date_input("End Date", datetime(2025, 12, 31))
         run_label = "RUN BACKTEST 🔙"
     else:
         run_label = "RUN LIVE ANALYSIS 🚀"
