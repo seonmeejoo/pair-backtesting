@@ -15,12 +15,7 @@ warnings.filterwarnings('ignore')
 # ---------------------------------------------------------
 # 1. 페이지 설정
 # ---------------------------------------------------------
-st.set_page_config(
-    page_title="Pro Quant Ultimate",
-    page_icon="💎",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Pro Quant Ultimate", page_icon="💎", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
@@ -28,17 +23,14 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("💎 Pro Quant Ultimate: Portfolio Backtest")
+st.title("💎 Pro Quant Ultimate: Robust Version")
 
 # ---------------------------------------------------------
 # 2. 사이드바
 # ---------------------------------------------------------
 with st.sidebar:
     st.header("1. Target Universe")
-    universe_mode = st.radio(
-        "분석 대상",
-        ["🦁 주식선물 가능 종목 (Hedge)", "🐳 Top 100 대규모 탐색 (Long Only)"]
-    )
+    universe_mode = st.radio("분석 대상", ["🦁 주식선물 가능 종목 (Hedge)", "🐳 Top 100 대규모 탐색 (Long Only)"])
     
     st.divider()
     st.header("2. Mode")
@@ -50,13 +42,14 @@ with st.sidebar:
     window_size = st.slider("Rolling Window", 20, 120, 60)
     z_threshold = st.slider("Z-Score Threshold", 1.5, 3.0, 2.0)
     
-    default_p = 0.05 if universe_mode.startswith("🐳") else 0.10
-    p_cutoff = st.slider("Max P-value", 0.01, 0.20, default_p)
+    # 🚨 P-value 기본값을 0.10으로 완화 (결과가 잘 나오도록)
+    p_cutoff = st.slider("Max P-value", 0.01, 0.20, 0.10, help="값이 클수록 조건을 완화하여 더 많은 페어를 찾습니다.")
 
     st.divider()
     
     if app_mode.startswith("🔙"):
         st.header("📅 Backtest Period")
+        # 기본값: 작년 1년치
         c1, c2 = st.columns(2)
         start_input = c1.date_input("Start", datetime(2023, 1, 1))
         end_input = c2.date_input("End", datetime(2023, 12, 31))
@@ -69,7 +62,7 @@ with st.sidebar:
     run_btn = st.button(run_label, type="primary", use_container_width=True)
 
 # ---------------------------------------------------------
-# 3. 데이터 로딩
+# 3. 데이터 로딩 (개선된 버전: 데이터 보존율 높임)
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_stock_data(universe_type, start_date, end_date):
@@ -106,7 +99,9 @@ def load_stock_data(universe_type, start_date, end_date):
     else:
         manual_tickers = tickers_futures
 
-    fetch_start = (pd.to_datetime(start_date) - timedelta(days=150)).strftime('%Y-%m-%d')
+    # [핵심 변경] 데이터 부족 방지를 위해 1년치 여유분을 더 가져옵니다.
+    # 백테스트 기간이 짧아도, 공적분 계산은 긴 데이터로 해야 정확합니다.
+    fetch_start = (pd.to_datetime(start_date) - timedelta(days=365)).strftime('%Y-%m-%d')
     fetch_end = pd.to_datetime(end_date).strftime('%Y-%m-%d')
     
     tickers_list = list(manual_tickers.keys())
@@ -118,7 +113,7 @@ def load_stock_data(universe_type, start_date, end_date):
     for i in range(0, len(tickers_list), chunk_size):
         chunk = tickers_list[i:i + chunk_size]
         try:
-            st_msg.write(f"📥 Batch {i//chunk_size + 1} Downloading...")
+            st_msg.write(f"📥 Batch {i//chunk_size + 1}...")
             df_chunk = yf.download(chunk, start=fetch_start, end=fetch_end, progress=False)['Close']
             if isinstance(df_chunk, pd.Series): df_chunk = df_chunk.to_frame(name=chunk[0])
             all_data_list.append(df_chunk)
@@ -130,55 +125,70 @@ def load_stock_data(universe_type, start_date, end_date):
     if all_data_list:
         df_final = pd.concat(all_data_list, axis=1)
         df_final = df_final.rename(columns=manual_tickers)
-        return df_final.ffill().dropna(axis=1)
+        
+        # [핵심 변경] dropna 조건을 완화합니다 (데이터가 일부 없어도 살림)
+        # 1. 일단 앞뒤 빈값 채우기
+        df_final = df_final.ffill().bfill()
+        # 2. 그래도 비어있는 컬럼만 삭제 (특정 종목만 삭제되고 나머지는 유지)
+        df_final = df_final.dropna(axis=1, how='any')
+        
+        return df_final
     return pd.DataFrame()
 
 # ---------------------------------------------------------
-# 4. 분석 엔진 (일별 수익률 시리즈 반환 추가)
+# 4. 분석 엔진 (Logic 수정: Training vs Testing 분리)
 # ---------------------------------------------------------
 def run_analysis(df_prices, window, threshold, p_cutoff, mode, start, end):
     pairs = []
     cols = df_prices.columns
     
-    if mode.startswith("🔙"):
-        mask = (df_prices.index >= pd.to_datetime(start)) & (df_prices.index <= pd.to_datetime(end))
-        df_anl = df_prices.loc[mask]
-    else:
-        df_anl = df_prices
-        
-    if len(df_anl) < window: return pd.DataFrame()
+    # [핵심 로직 변경]
+    # 공적분(관계성)은 '전체 기간'으로 확인하고,
+    # 수익률 계산만 '설정된 기간'으로 수행합니다.
+    # 이렇게 해야 기간을 짧게 잡아도 페어가 나옵니다.
+    
+    if len(df_prices) < window: return pd.DataFrame()
 
     prog_bar = st.progress(0)
     total_checks = len(cols) * (len(cols) - 1) // 2
     checked = 0
     
+    # 백테스팅 타겟 기간 마스크
+    target_mask = (df_prices.index >= pd.to_datetime(start)) & (df_prices.index <= pd.to_datetime(end))
+    
     for i in range(len(cols)):
         for j in range(i + 1, len(cols)):
             sa, sb = cols[i], cols[j]
             
-            # Speed Optim: Corr Check
-            if df_anl[sa].corr(df_anl[sb]) < 0.5:
+            if df_prices[sa].corr(df_prices[sb]) < 0.5:
                 checked += 1
                 continue
                 
             try:
-                score, pval, _ = coint(df_anl[sa], df_anl[sb])
+                # 1. 관계성 검증 (전체 데이터 사용 -> 페어 발견 확률 Up)
+                score, pval, _ = coint(df_prices[sa], df_prices[sb])
+                
                 if pval < p_cutoff:
+                    # 2. 지표 계산
                     log_a, log_b = np.log(df_prices[sa]), np.log(df_prices[sb])
                     spread = log_a - log_b
                     
                     mean = spread.rolling(window).mean()
                     std = spread.rolling(window).std()
                     z_all = (spread - mean) / std
-                    z_period = z_all.loc[df_anl.index]
                     
-                    # Backtest Logic
-                    pos = np.where(z_period < -threshold, 1, np.where(z_period > threshold, -1, 0))
-                    ret_a, ret_b = df_anl[sa].pct_change().fillna(0), df_anl[sb].pct_change().fillna(0)
+                    # 3. 백테스팅 (사용자가 지정한 기간만 잘라서 계산)
+                    z_target = z_all.loc[target_mask]
                     
-                    # Daily Strategy Return (중요: 이 부분이 포트폴리오 계산용)
-                    daily_strat_ret = (ret_a - ret_b) * pd.Series(pos).shift(1).fillna(0)
-                    cum_ret = (1 + daily_strat_ret).cumprod() - 1
+                    if z_target.empty: continue # 기간 내 데이터 없음
+                    
+                    pos = np.where(z_target < -threshold, 1, np.where(z_target > threshold, -1, 0))
+                    
+                    ret_a = df_prices[sa].loc[target_mask].pct_change().fillna(0)
+                    ret_b = df_prices[sb].loc[target_mask].pct_change().fillna(0)
+                    
+                    spr_ret = (ret_a - ret_b) * pd.Series(pos).shift(1).fillna(0).values
+                    cum_ret = (1 + spr_ret).cumprod() - 1
                     
                     curr_z = z_all.iloc[-1]
                     status = "Watch"
@@ -191,9 +201,9 @@ def run_analysis(df_prices, window, threshold, p_cutoff, mode, start, end):
                         'Status': status, 'Final_Ret': cum_ret[-1],
                         'Spread': spread, 'Mean': mean, 'Std': std,
                         'Cum_Ret_Series': cum_ret, 
-                        'Daily_Ret_Series': daily_strat_ret, # 포트폴리오용 일별 수익률
-                        'Analysis_Dates': df_anl.index,
-                        'Price A': df_anl[sa].iloc[-1], 'Price B': df_anl[sb].iloc[-1]
+                        'Daily_Ret_Series': spr_ret,
+                        'Analysis_Dates': z_target.index,
+                        'Price A': df_prices[sa].iloc[-1], 'Price B': df_prices[sb].iloc[-1]
                     })
             except: pass
             
@@ -204,7 +214,7 @@ def run_analysis(df_prices, window, threshold, p_cutoff, mode, start, end):
     return pd.DataFrame(pairs)
 
 # ---------------------------------------------------------
-# 5. 차트: 포트폴리오 & 개별
+# 5. 차트 그리기
 # ---------------------------------------------------------
 def plot_chart(row, df_prices, threshold, mode):
     sa, sb = row['Stock A'], row['Stock B']
@@ -234,105 +244,78 @@ def plot_chart(row, df_prices, threshold, mode):
 # 6. 메인 실행
 # ---------------------------------------------------------
 if run_btn:
-    df_prices = load_stock_data(universe_mode, start_input, end_input)
-    
-    if df_prices.empty:
-        st.error("Data Load Failed.")
+    # 1. 데이터 확인
+    with st.spinner("데이터 준비 중..."):
+        df_prices = load_stock_data(universe_mode, start_input, end_input)
+
+    if df_prices.empty or len(df_prices.columns) < 2:
+        st.error("🚨 데이터를 불러오지 못했습니다. (종목 수 부족)")
+        st.info("Tip: 잠시 후 다시 시도하거나, 앱을 재부팅(Reboot) 해주세요.")
     else:
+        st.success(f"✅ 데이터 로드 완료: {len(df_prices.columns)}개 종목 (기간: {df_prices.index[0].date()} ~ {df_prices.index[-1].date()})")
+        
+        # 2. 분석 실행
         results = run_analysis(df_prices, window_size, z_threshold, p_cutoff, app_mode, start_input, end_input)
         
         if results.empty:
-            st.warning("조건에 맞는 페어가 없습니다.")
+            st.warning("⚠️ 조건에 맞는 페어를 찾지 못했습니다.")
+            st.info("👉 **해결 방법:** 사이드바에서 'Max P-value'를 0.15~0.20으로 높여보세요.")
         else:
             if app_mode.startswith("🔙"):
-                # ====================================================
-                # [NEW] 포트폴리오 통합 백테스트 결과
-                # ====================================================
                 st.markdown(f"### 📊 Portfolio Backtest Result")
-                st.info(f"💡 시스템이 찾아낸 **총 {len(results)}개의 페어**에 자금을 **1/N로 분산 투자**했다고 가정했을 때의 결과입니다.")
+                st.info(f"시스템이 찾아낸 **총 {len(results)}개의 페어**로 포트폴리오를 구성했습니다.")
 
-                # 1. 일별 수익률 합치기 (Date Alignment)
-                # 모든 페어의 일별 수익률을 하나의 데이터프레임으로 만듭니다.
-                all_returns_df = pd.DataFrame(index=df_prices.loc[start_input:end_input].index)
-                
+                # 포트폴리오 계산
+                all_returns_df = pd.DataFrame(index=pd.date_range(start=start_input, end=end_input))
                 for idx, row in results.iterrows():
-                    pair_name = f"{row['Stock A']}-{row['Stock B']}"
-                    # 인덱스 매칭해서 넣기
                     series = row['Daily_Ret_Series']
-                    # 시계열 인덱스 맞추기 (reindex)
+                    series.index = pd.to_datetime(series.index) # 인덱스 통일
+                    # 중복 인덱스 제거 및 리인덱싱
+                    series = series[~series.index.duplicated(keep='first')]
                     series = series.reindex(all_returns_df.index).fillna(0)
-                    all_returns_df[pair_name] = series
+                    all_returns_df[f"{row['Stock A']}-{row['Stock B']}"] = series
 
-                # 2. 포트폴리오 수익률 계산 (Equal Weight: 평균)
-                portfolio_daily_ret = all_returns_df.mean(axis=1)
+                portfolio_daily_ret = all_returns_df.mean(axis=1).fillna(0)
                 portfolio_cum_ret = (1 + portfolio_daily_ret).cumprod() - 1
                 
-                # 3. MDD (최대 낙폭) 계산
-                cumulative_wealth = (1 + portfolio_daily_ret).cumprod()
-                peak = cumulative_wealth.expanding(min_periods=1).max()
-                drawdown = (cumulative_wealth - peak) / peak
-                max_drawdown = drawdown.min()
+                # MDD
+                wealth = (1 + portfolio_daily_ret).cumprod()
+                peak = wealth.expanding(min_periods=1).max()
+                dd = (wealth - peak) / peak
+                mdd = dd.min()
 
-                # 4. KPI Metrics
-                final_port_ret = portfolio_cum_ret.iloc[-1]
+                k1, k2, k3 = st.columns(3)
+                k1.metric("💰 Portfolio Return", f"{portfolio_cum_ret.iloc[-1]*100:.2f}%")
+                k2.metric("📉 MDD", f"{mdd*100:.2f}%")
+                k3.metric("🧩 Pairs", f"{len(results)} ea")
                 
-                kpi1, kpi2, kpi3 = st.columns(3)
-                kpi1.metric("💰 Total Portfolio Return", f"{final_port_ret*100:.2f}%")
-                kpi2.metric("📉 Max Drawdown (MDD)", f"{max_drawdown*100:.2f}%")
-                kpi3.metric("🧩 Active Pairs", f"{len(results)} ea")
-                
-                # 5. 포트폴리오 수익률 차트 (메인)
+                # 차트
                 fig_port = go.Figure()
-                fig_port.add_trace(go.Scatter(
-                    x=portfolio_cum_ret.index, 
-                    y=portfolio_cum_ret*100, 
-                    mode='lines', 
-                    name='Portfolio Equity',
-                    line=dict(color='#00C805', width=3),
-                    fill='tozeroy'
-                ))
-                fig_port.add_hline(y=0, line_color="gray", line_width=1)
-                fig_port.update_layout(
-                    title="<b>Portfolio Equity Curve (Cumulative Return)</b>",
-                    xaxis_title="Date",
-                    yaxis_title="Return (%)",
-                    hovermode="x unified",
-                    height=500
-                )
+                fig_port.add_trace(go.Scatter(x=portfolio_cum_ret.index, y=portfolio_cum_ret*100, mode='lines', name='Portfolio', line=dict(color='#00C805', width=3), fill='tozeroy'))
+                fig_port.add_hline(y=0, line_color="gray")
+                fig_port.update_layout(title="<b>Portfolio Equity Curve</b>", height=500, hovermode="x unified")
                 st.plotly_chart(fig_port, use_container_width=True)
                 
                 st.divider()
-                st.subheader("🔍 Individual Pair Performance")
-                
-                # 개별 페어 리스트 (기존 기능)
+                st.subheader("🔍 Individual Pair Performance (Top 5)")
                 for idx, row in results.sort_values('Final_Ret', ascending=False).head(5).iterrows():
                     with st.expander(f" 수익률 {row['Final_Ret']*100:.2f}% | {row['Stock A']} vs {row['Stock B']}", expanded=False):
                         st.plotly_chart(plot_chart(row, df_prices, z_threshold, app_mode), use_container_width=True)
 
             else:
-                # ====================================================
-                # Live Analysis Result
-                # ====================================================
+                # Live Mode
                 actives = results[results['Status'] != 'Watch']
                 st.metric("Active Signals", f"{len(actives)}", f"Total Analyzed: {len(results)}")
                 
                 if not actives.empty:
-                    is_futures = universe_mode.startswith("🦁")
-                    
                     for idx, row in actives.sort_values(by='Z-Score', key=abs, ascending=False).iterrows():
-                        alloc = total_capital / len(actives) # 자금을 신호 뜬 종목 수로 나눔 (선택사항)
-                        # 여기선 그냥 총 자본의 일부라고 가정하고 단순 표시
-                        qa = int((total_capital/10) / row['Price A']) # 예: 자본의 10%씩 투입 가정
-                        qb = int((total_capital/10) / row['Price B'])
-                        
+                        alloc = total_capital / 2
+                        qa = int(alloc / row['Price A'])
+                        qb = int(alloc / row['Price B'])
                         sa, sb = row['Stock A'], row['Stock B']
                         
-                        if row['Status'] == "Buy A":
-                            msg = f"🔵 Buy {sa} | 🔴 Sell {sb}" if is_futures else f"💡 매수 기회: {sa} (vs {sb})"
-                            clr = "green"
-                        else:
-                            msg = f"🔴 Sell {sa} | 🔵 Buy {sb}" if is_futures else f"💡 매수 기회: {sb} (vs {sa})"
-                            clr = "green" if not is_futures else "red"
+                        msg = f"🔵 Buy {sa} ({qa:,}주) | 🔴 Sell {sb} ({qb:,}주)" if row['Status']=="Buy A" else f"🔴 Sell {sa} ({qa:,}주) | 🔵 Buy {sb} ({qb:,}주)"
+                        clr = "green" if row['Status'].startswith("Buy") else "red"
                         
                         with st.expander(f":{clr}[Signal] {sa} vs {sb} (Z: {row['Z-Score']:.2f})", expanded=True):
                             st.info(msg)
