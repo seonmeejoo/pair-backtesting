@@ -16,12 +16,12 @@ warnings.filterwarnings('ignore')
 # 1. 페이지 설정
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Pair Trading System",
+    page_title="Pro Quant Dashboard",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# 커스텀 CSS
 st.markdown("""
 <style>
     .metric-card {
@@ -33,39 +33,46 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("Pair Trading System")
+st.title("⚡ Pro Quant Pair Trading System")
 
 # ---------------------------------------------------------
-# 2. 사이드바 (모드 선택 및 설정)
+# 2. 사이드바 (설정 + 자본금 입력)
 # ---------------------------------------------------------
 with st.sidebar:
-    app_mode = st.radio("Select Mode", ["Live Analysis (실전)", "Backtest (과거 검증)"])
+    st.header("🎛️ System Control")
+    app_mode = st.radio("Select Mode", ["📡 Live Analysis (실전)", "🔙 Backtest (과거 검증)"])
     st.divider()
     
-    st.header("Strategy Settings")
+    st.header("💰 Position Sizing")
+    # [NEW] 투자금 입력 창 추가
+    total_capital = st.number_input("총 투자금 (KRW)", min_value=1000000, value=10000000, step=1000000, format="%d")
+    st.caption("롱/숏 각각 50%씩 배분하여 수량을 계산합니다.")
+    st.divider()
+    
+    st.header("⚙️ Strategy Settings")
     window_size = st.slider("Rolling Window (Days)", 20, 120, 60)
     z_threshold = st.slider("Z-Score Threshold", 1.5, 3.0, 2.0, step=0.1)
     p_cutoff = st.slider("Max P-value", 0.01, 0.20, 0.10)
     
     st.divider()
     
-    if app_mode == "Backtest (과거 검증)":
-        st.header("Backtest Period")
+    if app_mode == "🔙 Backtest (과거 검증)":
+        st.header("📅 Backtest Period")
         col1, col2 = st.columns(2)
         with col1:
             start_date_input = st.date_input("Start Date", datetime(2023, 1, 1))
         with col2:
             end_date_input = st.date_input("End Date", datetime(2023, 12, 31))
-        run_label = "RUN BACKTEST"
+        run_label = "RUN BACKTEST 🔙"
     else:
-        run_label = "RUN LIVE ANALYSIS"
+        run_label = "RUN LIVE ANALYSIS 🚀"
         end_date_input = datetime.now()
         start_date_input = end_date_input - timedelta(days=365)
 
     run_btn = st.button(run_label, type="primary", use_container_width=True)
 
 # ---------------------------------------------------------
-# 3. 데이터 로딩 (청킹 + 랜덤 딜레이)
+# 3. 데이터 로딩
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_stock_data(start_date, end_date):
@@ -111,14 +118,13 @@ def load_stock_data(start_date, end_date):
     return pd.DataFrame()
 
 # ---------------------------------------------------------
-# 4. 핵심 엔진 (분석 + 백테스팅 + 포지션 기록)
+# 4. 분석 엔진
 # ---------------------------------------------------------
 def analyze_and_backtest(df_prices, window, threshold, p_cutoff, mode, start_date, end_date):
     pairs = []
     cols = df_prices.columns
     
-    # 분석 기간 필터링
-    if mode == "Backtest (과거 검증)":
+    if mode == "🔙 Backtest (과거 검증)":
         mask = (df_prices.index >= pd.to_datetime(start_date)) & (df_prices.index <= pd.to_datetime(end_date))
         df_analysis = df_prices.loc[mask]
     else:
@@ -138,11 +144,9 @@ def analyze_and_backtest(df_prices, window, threshold, p_cutoff, mode, start_dat
             stock_b = cols[j]
             
             try:
-                # 1. 공적분 검정
                 score, pvalue, _ = coint(df_analysis[stock_a], df_analysis[stock_b])
                 
                 if pvalue < p_cutoff:
-                    # 2. 지표 계산
                     log_a = np.log(df_prices[stock_a])
                     log_b = np.log(df_prices[stock_b])
                     spread = log_a - log_b
@@ -151,38 +155,38 @@ def analyze_and_backtest(df_prices, window, threshold, p_cutoff, mode, start_dat
                     rolling_std = spread.rolling(window=window).std()
                     rolling_z = (spread - rolling_mean) / rolling_std
                     
-                    # 분석 기간에 해당하는 데이터만 추출
                     z_score_period = rolling_z.loc[df_analysis.index]
                     
-                    # 3. 포지션 시뮬레이션
-                    # 1: Long Spread (Buy A, Sell B) / -1: Short Spread (Sell A, Buy B) / 0: Exit
+                    # Backtest Logic
                     positions = np.where(z_score_period < -threshold, 1, 
                                        np.where(z_score_period > threshold, -1, 0))
                     
-                    # 수익률 계산
                     ret_a = df_analysis[stock_a].pct_change().fillna(0)
                     ret_b = df_analysis[stock_b].pct_change().fillna(0)
-                    
-                    # 전날 시그널대로 오늘 매매 (Shift 1)
                     spread_ret = (ret_a - ret_b) * pd.Series(positions).shift(1).fillna(0).values
                     cum_ret = (1 + spread_ret).cumprod() - 1
                     
-                    # 4. 결과 저장
+                    # Live Logic
                     current_z = rolling_z.iloc[-1]
                     corr = df_analysis[stock_a].corr(df_analysis[stock_b])
                     
                     status = "Watch"
                     if current_z < -threshold: status = "Buy A / Sell B"
                     elif current_z > threshold: status = "Sell A / Buy B"
+                    
+                    # [NEW] 현재 가격 정보 저장 (수량 계산용)
+                    price_a_last = df_analysis[stock_a].iloc[-1]
+                    price_b_last = df_analysis[stock_b].iloc[-1]
 
                     pairs.append({
                         'Stock A': stock_a, 'Stock B': stock_b,
+                        'Price A': price_a_last, 'Price B': price_b_last,
                         'Corr': corr, 'P-value': pvalue,
                         'Z-Score': current_z, 'Status': status,
                         'Spread': spread, 'Mean': rolling_mean, 'Std': rolling_std,
                         'Final_Ret': cum_ret[-1], 
                         'Cum_Ret_Series': cum_ret,
-                        'Positions': pd.Series(positions, index=df_analysis.index), # 포지션 기록
+                        'Positions': pd.Series(positions, index=df_analysis.index),
                         'Analysis_Dates': df_analysis.index
                     })
             except: continue
@@ -195,18 +199,15 @@ def analyze_and_backtest(df_prices, window, threshold, p_cutoff, mode, start_dat
     return pd.DataFrame(pairs)
 
 # ---------------------------------------------------------
-# 5. 차트 그리기 (3단 구성: 가격+신호 / 수익률 / Z-Score)
+# 5. 차트 그리기
 # ---------------------------------------------------------
 def plot_results(row, df_prices, window, threshold, mode):
     sa, sb = row['Stock A'], row['Stock B']
-    
-    # 데이터 준비
     dates = row['Analysis_Dates']
     
-    # 3단 차트 생성
-    if mode == "Backtest (과거 검증)":
+    if mode == "🔙 Backtest (과거 검증)":
         rows = 3
-        subplot_titles = (f"Price Action & Signals ({sa} vs {sb})", "Strategy Performance (Cumulative Return)", "Spread Z-Score")
+        subplot_titles = (f"Price Action ({sa} vs {sb})", "Strategy Performance", "Spread Z-Score")
         specs = [[{"secondary_y": False}], [{"secondary_y": False}], [{"secondary_y": False}]]
         row_heights = [0.4, 0.3, 0.3]
     else:
@@ -218,57 +219,20 @@ def plot_results(row, df_prices, window, threshold, mode):
     fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.08,
                         subplot_titles=subplot_titles, row_heights=row_heights, specs=specs)
 
-    # -------------------------------------------------------
-    # [1단] 주가 그래프 + 매매 신호
-    # -------------------------------------------------------
     pa = df_prices[sa].loc[dates]
     pb = df_prices[sb].loc[dates]
-    
-    # 정규화 (시작점 100)
     pa_norm = (pa / pa.iloc[0]) * 100
     pb_norm = (pb / pb.iloc[0]) * 100
     
     fig.add_trace(go.Scatter(x=dates, y=pa_norm, name=sa, line=dict(color='#1f77b4')), row=1, col=1)
     fig.add_trace(go.Scatter(x=dates, y=pb_norm, name=sb, line=dict(color='#ff7f0e')), row=1, col=1)
 
-    # 매수/매도 시점 표시 (Backtest 모드일 때만)
-    if mode == "Backtest (과거 검증)":
-        pos = row['Positions']
-        
-        # Long Spread 진입 (Buy A, Sell B) -> Z < -Threshold
-        # 포지션이 0 -> 1 로 바뀌는 지점
-        long_entry = pos[(pos == 1) & (pos.shift(1) != 1)].index
-        
-        # Short Spread 진입 (Sell A, Buy B) -> Z > Threshold
-        # 포지션이 0 -> -1 로 바뀌는 지점
-        short_entry = pos[(pos == -1) & (pos.shift(1) != -1)].index
-        
-        # 차트에 마커 추가
-        fig.add_trace(go.Scatter(
-            x=long_entry, y=pa_norm.loc[long_entry],
-            mode='markers', marker=dict(symbol='triangle-up', color='green', size=12),
-            name='Long A / Short B (Entry)'
-        ), row=1, col=1)
-        
-        fig.add_trace(go.Scatter(
-            x=short_entry, y=pa_norm.loc[short_entry],
-            mode='markers', marker=dict(symbol='triangle-down', color='red', size=12),
-            name='Sell A / Buy B (Entry)'
-        ), row=1, col=1)
-
-    # -------------------------------------------------------
-    # [2단] 누적 수익률 (Backtest only)
-    # -------------------------------------------------------
-    if mode == "Backtest (과거 검증)":
+    if mode == "🔙 Backtest (과거 검증)":
         cum_ret = row['Cum_Ret_Series'] * 100
-        fig.add_trace(go.Scatter(x=dates, y=cum_ret, name='Profit (%)', 
+        fig.add_trace(go.Scatter(x=dates, y=cum_ret, name='Return (%)', 
                                  line=dict(color='green', width=1.5), fill='tozeroy'), row=2, col=1)
-        fig.add_hline(y=0, line_color="black", line_width=0.5, row=2, col=1)
 
-    # -------------------------------------------------------
-    # [3단] Z-Score (Live는 2단, Backtest는 3단)
-    # -------------------------------------------------------
-    z_row = 3 if mode == "Backtest (과거 검증)" else 2
+    z_row = 3 if mode == "🔙 Backtest (과거 검증)" else 2
     
     spread = row['Spread']
     z_score = (spread - row['Mean']) / row['Std']
@@ -279,13 +243,12 @@ def plot_results(row, df_prices, window, threshold, mode):
     fig.add_hline(y=-threshold, line_dash="dash", line_color="blue", row=z_row, col=1)
     fig.add_hline(y=0, line_color="black", line_width=0.5, row=z_row, col=1)
 
-    # 레이아웃 조정
     fig.update_layout(height=800 if mode == "🔙 Backtest (과거 검증)" else 600, 
                       hovermode="x unified", margin=dict(l=20, r=20, t=30, b=20))
     return fig
 
 # ---------------------------------------------------------
-# 6. 메인 실행 블록
+# 6. 메인 실행
 # ---------------------------------------------------------
 if run_btn:
     df_prices = load_stock_data(start_date_input, end_date_input)
@@ -298,9 +261,12 @@ if run_btn:
         if results.empty:
             st.warning("조건을 만족하는 페어를 찾지 못했습니다.")
         else:
-            if app_mode == "Backtest (과거 검증)":
-                # --- 백테스팅 결과 화면 ---
-                st.markdown(f"### Backtest Report ({start_date_input} ~ {end_date_input})")
+            if app_mode == "🔙 Backtest (과거 검증)":
+                st.markdown(f"### 🔙 Backtest Report ({start_date_input} ~ {end_date_input})")
+                
+                # --- [NEW] 모의 투자 시뮬레이션 결과 ---
+                # 백테스팅의 경우 '마지막 날' 기준 가격으로 수량을 계산해봄 (참고용)
+                # 실제 백테스팅 수익률은 이미 계산되어 있음 (Final_Ret)
                 
                 top_performer = results.loc[results['Final_Ret'].idxmax()]
                 avg_return = results['Final_Ret'].mean()
@@ -314,33 +280,52 @@ if run_btn:
                 st.subheader("🏆 Top Performing Pairs (Detail)")
                 
                 sorted_res = results.sort_values(by='Final_Ret', ascending=False)
-                
                 for idx, row in sorted_res.head(5).iterrows():
                     ret_color = "green" if row['Final_Ret'] > 0 else "red"
                     with st.expander(f"**:{ret_color}[{row['Final_Ret']*100:.2f}%]** | {row['Stock A']} vs {row['Stock B']}", expanded=True if idx==0 else False):
                         st.plotly_chart(plot_results(row, df_prices, window_size, z_threshold, app_mode), use_container_width=True)
                         
             else:
-                # --- 실전 분석 화면 ---
+                # 📡 Live Analysis Mode
                 st.markdown("### 📡 Live Signal Dashboard")
+                
                 action_items = results[results['Status'] != 'Watch']
                 
                 c1, c2 = st.columns(2)
                 c1.metric("Analyzed Pairs", f"{len(results)}")
-                c2.metric("Active Signals", f"{len(action_items)}")
+                c2.metric("Active Signals", f"{len(action_items)}", delta="Action Required")
                 
                 st.divider()
                 
-                tab1, tab2 = st.tabs(["🔥 Signals", "📋 Watchlist"])
+                tab1, tab2 = st.tabs(["🔥 Signals (with Qty)", "📋 Watchlist"])
                 
                 with tab1:
                     if not action_items.empty:
+                        st.success(f"💰 총 투자금 {total_capital:,}원을 기준으로 계산된 수량입니다.")
+                        
                         for idx, row in action_items.sort_values(by='Z-Score', key=abs, ascending=False).iterrows():
+                            # --- [NEW] 수량 계산 로직 (Dollar Neutral) ---
+                            # 각 종목에 자본의 50%씩 할당
+                            allocation = total_capital / 2
+                            qty_a = int(allocation / row['Price A'])
+                            qty_b = int(allocation / row['Price B'])
+                            
+                            val_a = qty_a * row['Price A']
+                            val_b = qty_b * row['Price B']
+                            
                             status_color = "red" if row['Z-Score'] > 0 else "blue"
+                            
+                            # 시그널 메시지 생성
+                            if "Buy A" in row['Status']:
+                                trade_msg = f"🔵 **BUY** {row['Stock A']} **{qty_a:,}주** ({val_a/10000:.0f}만원)  |  🔴 **SELL** {row['Stock B']} **{qty_b:,}주** ({val_b/10000:.0f}만원)"
+                            else:
+                                trade_msg = f"🔴 **SELL** {row['Stock A']} **{qty_a:,}주** ({val_a/10000:.0f}만원)  |  🔵 **BUY** {row['Stock B']} **{qty_b:,}주** ({val_b/10000:.0f}만원)"
+
                             with st.expander(f":{status_color}[{row['Status']}] {row['Stock A']} vs {row['Stock B']} (Z: {row['Z-Score']:.2f})", expanded=True):
+                                st.markdown(f"### 👉 {trade_msg}")
                                 st.plotly_chart(plot_results(row, df_prices, window_size, z_threshold, app_mode), use_container_width=True)
                     else:
-                        st.info("현재 진입 신호가 없습니다.")
+                        st.info("현재 진입 신호가 발생한 종목이 없습니다.")
                         
                 with tab2:
                     st.dataframe(results[['Stock A', 'Stock B', 'Z-Score', 'P-value', 'Corr']].sort_values('P-value'))
