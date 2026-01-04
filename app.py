@@ -270,29 +270,60 @@ def run_analysis(df_prices, window, entry_thresh, exit_thresh, stop_loss, p_cuto
     return pd.DataFrame(pairs)
 
 # ---------------------------------------------------------
-# 5. 시각화 (타이틀 추가)
+# 5. 시각화 (인터랙티브 시그널 차트 개선)
 # ---------------------------------------------------------
 def plot_chart(row, df_prices, entry, exit, stop, mode):
     sa, sb = row['Stock A'], row['Stock B']
     dates = row['Analysis_Dates']
     
-    # [NEW] 한글 종목명 형식의 타이틀 생성
     title_text = f"{sa} vs {sb} 상세 분석"
     
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.25, 0.25])
     
     # 1. Price
     pa, pb = df_prices[sa].loc[dates], df_prices[sb].loc[dates]
-    fig.add_trace(go.Scatter(x=dates, y=(pa/pa.iloc[0]-1)*100, name=sa, line=dict(color='#3B82F6', width=1.5)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=dates, y=(pb/pb.iloc[0]-1)*100, name=sb, line=dict(color='#F59E0B', width=1.5)), row=1, col=1)
     
-    # 2. Z-Score
+    # 정규화
+    pa_norm = (pa / pa.iloc[0]) * 100
+    pb_norm = (pb / pb.iloc[0]) * 100
+    
+    fig.add_trace(go.Scatter(x=dates, y=pa_norm, name=sa, line=dict(color='#3B82F6', width=1.5)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=pb_norm, name=sb, line=dict(color='#F59E0B', width=1.5)), row=1, col=1)
+    
+    # 2. Z-Score & Signals
     z_vals = ((row['Spread'] - row['Mean']) / row['Std']).loc[dates]
+    
+    # Z-Score Line
     fig.add_trace(go.Scatter(x=dates, y=z_vals, name='Z-Score', line=dict(color='#9CA3AF', width=1)), row=2, col=1)
-    fig.add_hline(y=entry, line_dash="dot", line_color="#10B981", row=2, col=1)
-    fig.add_hline(y=-entry, line_dash="dot", line_color="#10B981", row=2, col=1)
-    fig.add_hline(y=stop, line_color="#EF4444", row=2, col=1)
-    fig.add_hline(y=-stop, line_color="#EF4444", row=2, col=1)
+    
+    # Signal Markers (Overbought/Oversold)
+    # Z > entry : Sell Signal (Overbought) -> Red Marker
+    sell_sig = z_vals[z_vals > entry]
+    fig.add_trace(go.Scatter(
+        x=sell_sig.index, y=sell_sig,
+        mode='markers', marker=dict(color='#EF4444', size=5, symbol='circle'), # Red
+        name='매도 신호 (Sell)', showlegend=False
+    ), row=2, col=1)
+    
+    # Z < -entry : Buy Signal (Oversold) -> Blue Marker
+    buy_sig = z_vals[z_vals < -entry]
+    fig.add_trace(go.Scatter(
+        x=buy_sig.index, y=buy_sig,
+        mode='markers', marker=dict(color='#3B82F6', size=5, symbol='circle'), # Blue
+        name='매수 신호 (Buy)', showlegend=False
+    ), row=2, col=1)
+
+    # Threshold Lines & Safe Zone
+    fig.add_hline(y=entry, line_dash="dash", line_color="#EF4444", row=2, col=1)
+    fig.add_hline(y=-entry, line_dash="dash", line_color="#3B82F6", row=2, col=1)
+    fig.add_hline(y=0, line_color="gray", line_width=1, row=2, col=1)
+    
+    # Safe Zone Background (Between Thresholds)
+    fig.add_hrect(
+        y0=-entry, y1=entry,
+        fillcolor="gray", opacity=0.1, line_width=0,
+        row=2, col=1
+    )
 
     # 3. PnL
     if "백테스트" in mode:
@@ -300,7 +331,7 @@ def plot_chart(row, df_prices, entry, exit, stop, mode):
         fig.add_trace(go.Scatter(x=dates, y=cum, name='수익률 %', line=dict(color='#10B981', width=1.5), fill='tozeroy'), row=3, col=1)
 
     fig.update_layout(
-        title=dict(text=title_text, font=dict(size=20, color="white")), # [NEW] 타이틀 추가
+        title=dict(text=title_text, font=dict(size=20, color="white")),
         height=600, hovermode="x unified", template="plotly_dark",
         margin=dict(l=10, r=10, t=50, b=10), showlegend=True,
         plot_bgcolor='#1A1C24', paper_bgcolor='#1A1C24',
@@ -308,7 +339,7 @@ def plot_chart(row, df_prices, entry, exit, stop, mode):
     )
     return fig
 
-# [NEW] 히트맵 차트 함수 추가
+# [NEW] 히트맵 차트 함수
 def plot_heatmap(results):
     if results.empty: return None
     top_pairs = results.sort_values(by='Z-Score', key=abs, ascending=False).head(10)
@@ -379,12 +410,12 @@ if run_btn:
                 st.plotly_chart(plot_heatmap(results), use_container_width=True)
 
                 st.markdown("---")
-                st.subheader("🏆 Best Performers (Top 5)")
+                st.subheader("🏆 베스트 퍼포머 (Top 5)")
                 for idx, row in results.sort_values('Final_Ret', ascending=False).head(5).iterrows():
                     with st.expander(f"🟢 {fmt(row['Stock A'])} / {fmt(row['Stock B'])} (수익률: {row['Final_Ret']*100:.1f}%)"):
                         st.plotly_chart(plot_chart(row, df_prices, entry_z, exit_z, stop_loss_z, app_mode), use_container_width=True)
                 
-                st.subheader("Bad Guys (Worst)")
+                st.subheader("📉 워스트 퍼포머 (Risk Check)")
                 for idx, row in results.sort_values('Final_Ret', ascending=True).head(3).iterrows():
                     with st.expander(f"🔴 {fmt(row['Stock A'])} / {fmt(row['Stock B'])} (손실: {row['Final_Ret']*100:.1f}%)"):
                         st.plotly_chart(plot_chart(row, df_prices, entry_z, exit_z, stop_loss_z, app_mode), use_container_width=True)
