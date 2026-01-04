@@ -8,17 +8,14 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import yfinance as yf
 import warnings
-import time
-import random
 
 warnings.filterwarnings('ignore')
 
 # ---------------------------------------------------------
-# 1. UI 및 테마 설정
+# 1. UI Settings (No Emojis, Professional Look)
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Pair Trading Scanner",
-    page_icon="🔎",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -27,109 +24,106 @@ st.markdown("""
 <style>
     .stApp { background-color: #1A1C24; color: #E0E0E0; font-family: 'Pretendard', sans-serif; }
     section[data-testid="stSidebar"] { background-color: #111317; border-right: 1px solid #2B2D35; }
-    div[data-testid="metric-container"] { background-color: #252830; border: 1px solid #363945; border-radius: 8px; padding: 15px; }
-    div.stButton > button { background-color: #3B82F6; color: white; border: none; border-radius: 6px; height: 3em; font-weight: 600; }
-    h1, h2, h3 { color: #F3F4F6 !important; font-weight: 700 !important; }
+    div[data-testid="metric-container"] { background-color: #252830; border: 1px solid #363945; border-radius: 4px; padding: 15px; }
+    
+    /* 버튼 스타일 조정 (작고 깔끔하게) */
+    div.stButton > button { 
+        background-color: #374151; 
+        color: white; 
+        border: 1px solid #4B5563; 
+        border-radius: 4px; 
+        font-size: 0.8rem;
+    }
+    div.stButton > button:hover { background-color: #4B5563; }
+    
+    h1, h2, h3 { color: #F3F4F6 !important; font-weight: 600 !important; }
     
     /* 태그 뱃지 스타일 */
     .tag-badge {
-        display: inline-block;
-        padding: 2px 8px;
+        background-color: #3B82F6;
+        color: white;
+        padding: 2px 6px;
         border-radius: 4px;
-        font-size: 0.8em;
-        font-weight: 600;
-        margin-right: 5px;
+        font-size: 0.75rem;
+        font-weight: 500;
+        margin-right: 6px;
     }
 </style>
 """, unsafe_allow_html=True)
 
+# 기본값 정의 (단순화됨)
 DEFAULTS = {
     "window_size": 60,
-    "entry_z": 2.0,
-    "exit_z": 0.0,
-    "stop_loss_z": 4.0,
+    "z_threshold": 2.0, # 하나로 통합
     "p_cutoff": 0.05
 }
 
 # ---------------------------------------------------------
-# 2. 그룹핑 정의 (Logic Engine) - 확장판 (V11.5)
+# 2. Logic Engine (Clean Tags)
 # ---------------------------------------------------------
 RELATIONSHIP_MAP = [
-    # 1. 👨‍👦 지주사 vs 자회사 (Holding Discounts)
-    ({'SK', 'SK하이닉스'}, '👨‍👦 SK그룹(지주-반도체)'),
-    ({'SK', 'SK이노베이션'}, '👨‍👦 SK그룹(지주-에너지)'),
-    ({'SK', 'SK텔레콤'}, '👨‍👦 SK그룹(지주-통신)'),
-    ({'LG', 'LG전자'}, '👨‍👦 LG그룹(지주-가전)'),
-    ({'LG', 'LG화학'}, '👨‍👦 LG그룹(지주-화학)'),
-    ({'POSCO홀딩스', 'POSCO퓨처엠'}, '👨‍👦 포스코(지주-소재)'),
-    ({'CJ', 'CJ제일제당'}, '👨‍👦 CJ그룹(지주-식품)'),
-    ({'LS', 'LS ELECTRIC'}, '👨‍👦 LS그룹(지주-전력)'),
-    ({'삼성물산', '삼성전자'}, '👨‍👦 삼성(사실상 지주)'),
-    ({'삼성물산', '삼성생명'}, '👨‍👦 삼성(지배구조)'),
-    ({'한화', '한화에어로스페이스'}, '👨‍👦 한화(지주-방산)'),
-    ({'한화', '한화솔루션'}, '👨‍👦 한화(지주-태양광)'),
-    ({'HD현대', 'HD한국조선해양'}, '👨‍👦 HD현대(지주-조선)'),
+    # 1. Parent-Child
+    ({'SK', 'SK하이닉스'}, 'SK Group (Parent-Child)'),
+    ({'SK', 'SK이노베이션'}, 'SK Group (Parent-Child)'),
+    ({'SK', 'SK텔레콤'}, 'SK Group (Parent-Child)'),
+    ({'LG', 'LG전자'}, 'LG Group (Parent-Child)'),
+    ({'LG', 'LG화학'}, 'LG Group (Parent-Child)'),
+    ({'POSCO홀딩스', 'POSCO퓨처엠'}, 'POSCO (Parent-Child)'),
+    ({'CJ', 'CJ제일제당'}, 'CJ Group (Parent-Child)'),
+    ({'LS', 'LS ELECTRIC'}, 'LS Group (Parent-Child)'),
+    ({'삼성물산', '삼성전자'}, 'Samsung (Governance)'),
+    ({'삼성물산', '삼성생명'}, 'Samsung (Governance)'),
+    ({'한화', '한화에어로스페이스'}, 'Hanwha (Parent-Child)'),
+    ({'한화', '한화솔루션'}, 'Hanwha (Parent-Child)'),
+    ({'HD현대', 'HD한국조선해양'}, 'HD Hyundai (Parent-Child)'),
 
-    # 2. ⚡ 우선주 vs 본주 (괴리율 차익)
-    ({'삼성전자', '삼성전자우'}, '⚡ 본주-우선주'),
-    ({'현대차', '현대차2우B'}, '⚡ 본주-우선주'),
-    ({'현대차', '현대차우'}, '⚡ 본주-우선주'),
-    ({'LG화학', 'LG화학우'}, '⚡ 본주-우선주'),
-    ({'LG전자', 'LG전자우'}, '⚡ 본주-우선주'),
-    ({'삼성SDI', '삼성SDI우'}, '⚡ 본주-우선주'),
-    ({'아모레퍼시픽', '아모레퍼시픽우'}, '⚡ 본주-우선주'),
+    # 2. Preferred-Common
+    ({'삼성전자', '삼성전자우'}, 'Common-Preferred'),
+    ({'현대차', '현대차2우B'}, 'Common-Preferred'),
+    ({'현대차', '현대차우'}, 'Common-Preferred'),
+    ({'LG화학', 'LG화학우'}, 'Common-Preferred'),
+    ({'LG전자', 'LG전자우'}, 'Common-Preferred'),
+    ({'삼성SDI', '삼성SDI우'}, 'Common-Preferred'),
+    ({'아모레퍼시픽', '아모레퍼시픽우'}, 'Common-Preferred'),
 
-    # 3. ⚔️ 업종 내 경쟁사 (Rivals)
-    # 반도체/IT
-    ({'삼성전자', 'SK하이닉스'}, '⚔️ 반도체 투톱'),
-    ({'NAVER', '카카오'}, '⚔️ 빅테크 경쟁'),
-    ({'삼성SDS', 'SK C&C'}, '⚔️ IT서비스'), # SK C&C는 비상장이므로 SK로 대체 고려 가능하나 여기선 제외
-    
-    # 자동차/배터리
-    ({'현대차', '기아'}, '⚔️ 완성차 형제'),
-    ({'현대모비스', '현대위아'}, '⚔️ 자동차 부품'),
-    ({'LG에너지솔루션', '삼성SDI'}, '⚔️ 배터리 셀'),
-    ({'삼성SDI', 'SK이노베이션'}, '⚔️ 배터리 셀'),
-    ({'에코프로비엠', '엘앤에프'}, '⚔️ 양극재(코스닥)'),
-    ({'POSCO퓨처엠', '에코프로비엠'}, '⚔️ 양극재(소재)'),
+    # 3. Rivals
+    ({'삼성전자', 'SK하이닉스'}, 'Semicon Rivals'),
+    ({'NAVER', '카카오'}, 'Tech Rivals'),
+    ({'현대차', '기아'}, 'Auto Rivals'),
+    ({'현대모비스', '현대위아'}, 'Auto Parts Rivals'),
+    ({'LG에너지솔루션', '삼성SDI'}, 'Battery Rivals'),
+    ({'삼성SDI', 'SK이노베이션'}, 'Battery Rivals'),
+    ({'에코프로비엠', '엘앤에프'}, 'Cathode Rivals'),
+    ({'POSCO퓨처엠', '에코프로비엠'}, 'Cathode Rivals'),
+    ({'HD현대중공업', '삼성중공업'}, 'Shipbuilding Rivals'),
+    ({'한화오션', '삼성중공업'}, 'Shipbuilding Rivals'),
+    ({'HD현대중공업', '한화오션'}, 'Shipbuilding Rivals'),
+    ({'POSCO홀딩스', '현대제철'}, 'Steel Rivals'),
+    ({'고려아연', '영풍'}, 'Metal Rivals'),
+    ({'S-Oil', 'GS'}, 'Oil Rivals'), 
+    ({'아모레퍼시픽', 'LG생활건강'}, 'Cosmetic Rivals'),
+    ({'이마트', '롯데쇼핑'}, 'Retail Rivals'),
+    ({'하이트진로', '롯데칠성'}, 'Beverage Rivals'),
+    ({'대한항공', '아시아나항공'}, 'Airline Rivals'),
+    ({'KB금융', '신한지주'}, 'Bank Rivals'),
+    ({'하나금융지주', '우리금융지주'}, 'Bank Rivals'),
+    ({'삼성화재', 'DB손해보험'}, 'Insurance Rivals'),
+    ({'미래에셋증권', '한국금융지주'}, 'Securities Rivals'),
+    ({'SK텔레콤', 'KT'}, 'Telco Rivals'),
+    ({'KT', 'LG유플러스'}, 'Telco Rivals'),
+    ({'크래프톤', '엔씨소프트'}, 'Game Rivals'),
+    ({'넷마블', '엔씨소프트'}, 'Game Rivals'),
+    ({'하이브', '에스엠'}, 'Ent. Rivals'),
+    ({'JYP Ent.', '와이지엔터테인먼트'}, 'Ent. Rivals'),
 
-    # 중공업/소재
-    ({'HD현대중공업', '삼성중공업'}, '⚔️ 조선 빅3'),
-    ({'한화오션', '삼성중공업'}, '⚔️ 조선 빅3'),
-    ({'HD현대중공업', '한화오션'}, '⚔️ 조선 빅3'),
-    ({'POSCO홀딩스', '현대제철'}, '⚔️ 철강 경쟁'),
-    ({'고려아연', '영풍'}, '⚔️ 비철금속(경영권)'),
-    ({'S-Oil', 'GS'}, '⚔️ 정유(GS칼텍스)'), 
-    
-    # 소비재/유통
-    ({'아모레퍼시픽', 'LG생활건강'}, '⚔️ 화장품 투톱'),
-    ({'이마트', '롯데쇼핑'}, '⚔️ 유통 공룡'),
-    ({'하이트진로', '롯데칠성'}, '⚔️ 주류 경쟁'),
-    ({'대한항공', '아시아나항공'}, '⚔️ 항공(인수이슈)'),
-    ({'하나투어', '모두투어'}, '⚔️ 여행사'),
-
-    # 금융/통신
-    ({'KB금융', '신한지주'}, '⚔️ 금융지주 1,2위'),
-    ({'하나금융지주', '우리금융지주'}, '⚔️ 금융지주 3,4위'),
-    ({'삼성화재', 'DB손해보험'}, '⚔️ 손해보험'),
-    ({'미래에셋증권', '한국금융지주'}, '⚔️ 증권사'),
-    ({'SK텔레콤', 'KT'}, '⚔️ 통신 1,2위'),
-    ({'KT', 'LG유플러스'}, '⚔️ 통신 2,3위'),
-
-    # 게임/엔터
-    ({'크래프톤', '엔씨소프트'}, '⚔️ 게임 대장주'),
-    ({'넷마블', '엔씨소프트'}, '⚔️ 게임 경쟁'),
-    ({'하이브', '에스엠'}, '⚔️ 엔터 대장주'),
-    ({'JYP Ent.', '와이지엔터테인먼트'}, '⚔️ 엔터 경쟁'),
-
-    # 4. 🔗 밸류체인 (Supply Chain)
-    ({'SK하이닉스', '한미반도체'}, '🔗 HBM 연합'),
-    ({'삼성전자', '삼성전기'}, '🔗 IT부품 공급'),
-    ({'LG전자', 'LG이노텍'}, '🔗 카메라모듈'),
-    ({'현대차', '현대모비스'}, '🔗 완성차-모듈'),
-    ({'현대차', '현대글로비스'}, '🔗 완성차-물류'),
-    ({'한화에어로스페이스', 'LIG넥스원'}, '🔗 K-방산 수출'),
-    ({'한화에어로스페이스', '현대로템'}, '🔗 K-방산 수출')
+    # 4. Supply Chain
+    ({'SK하이닉스', '한미반도체'}, 'Value Chain (HBM)'),
+    ({'삼성전자', '삼성전기'}, 'Value Chain (IT)'),
+    ({'LG전자', 'LG이노텍'}, 'Value Chain (IT)'),
+    ({'현대차', '현대모비스'}, 'Value Chain (Auto)'),
+    ({'현대차', '현대글로비스'}, 'Value Chain (Logistics)'),
+    ({'한화에어로스페이스', 'LIG넥스원'}, 'Defense Peers'),
+    ({'한화에어로스페이스', '현대로템'}, 'Defense Peers')
 ]
 
 def get_pair_tag(stock_a, stock_b):
@@ -137,93 +131,123 @@ def get_pair_tag(stock_a, stock_b):
     for pair_set, tag_name in RELATIONSHIP_MAP:
         if current_set == pair_set:
             return tag_name
-    return "📊 통계적 발견" # 리스트에 없지만 통계적으로 잡힌 경우
+    return "Random" # 수정됨
 
 # ---------------------------------------------------------
-# 3. 사이드바
+# 3. Sidebar (Cleaned)
 # ---------------------------------------------------------
 with st.sidebar:
-    st.header("설정 (Settings)")
-    if st.button("🔄 설정 초기화"):
-        for key, value in DEFAULTS.items():
-            st.session_state[key] = value
-        st.rerun()
-
-    st.divider()
-    universe_mode = st.selectbox("분석 대상 그룹", ["KOSPI 200 (선물/헷지)", "시가총액 상위 100 (Long Only)"])
-    app_mode = st.radio("실행 모드", ["실시간 분석 (Live)", "백테스트 (Backtest)"])
-    st.divider()
-    total_capital = st.number_input("투자 원금 (KRW)", value=10000000, step=1000000, format="%d")
+    st.header("Settings")
     
-    with st.expander("⚙️ 전략 파라미터", expanded=True):
+    universe_mode = st.selectbox("Target Universe", ["KOSPI 200 (Futures/Hedge)", "Top 100 (Long Only)"])
+    app_mode = st.radio("Mode", ["Live Analysis", "Backtest"])
+    
+    st.divider()
+    
+    total_capital = st.number_input("Capital (KRW)", value=10000000, step=1000000, format="%d")
+    
+    # "Parameters"로 이름 변경 및 초기화 버튼 이동
+    with st.expander("Parameters", expanded=True):
+        # Session State Init
         for key in DEFAULTS:
-            if key not in st.session_state: st.session_state[key] = DEFAULTS[key]
-        window_size = st.slider("분석 기간 (Window)", 20, 120, key="window_size")
-        entry_z = st.slider("진입 기준 (Z-Score)", 1.0, 4.0, key="entry_z")
-        exit_z = st.slider("익절 기준 (Z-Score)", -1.0, 1.0, key="exit_z")
-        stop_loss_z = st.slider("손절 기준 (Z-Score)", 3.0, 8.0, key="stop_loss_z")
-        p_cutoff = st.slider("연관성 기준 (P-value)", 0.01, 0.30, key="p_cutoff")
+            if key not in st.session_state:
+                st.session_state[key] = DEFAULTS[key]
+
+        window_size = st.slider("Window Size", 20, 120, key="window_size")
+        
+        # Z-Score 하나만 남김
+        z_threshold = st.slider("Z-Score Threshold", 1.0, 4.0, key="z_threshold", help="Entry level. Exit is at 0.")
+        
+        p_cutoff = st.slider("Max P-value", 0.01, 0.30, key="p_cutoff")
+        
+        st.write("") # 간격
+        # 초기화 버튼 축소 및 이동
+        if st.button("Reset Parameters"):
+            for key, value in DEFAULTS.items():
+                st.session_state[key] = value
+            st.rerun()
 
     st.divider()
-    if app_mode == "백테스트 (Backtest)":
-        st.subheader("검증 기간")
+    
+    if app_mode == "Backtest":
+        st.subheader("Period")
         c1, c2 = st.columns(2)
-        start_input = c1.date_input("시작일", datetime(2025, 1, 1))
-        end_input = c2.date_input("종료일", datetime(2025, 12, 31))
-        run_label = "백테스트 실행"
+        start_input = c1.date_input("Start", datetime(2025, 1, 1))
+        end_input = c2.date_input("End", datetime(2025, 12, 31))
+        run_label = "Run Backtest"
     else:
-        end_input = datetime.now(); start_input = end_input - timedelta(days=365)
-        run_label = "실시간 분석 시작"
+        end_input = datetime.now()
+        start_input = end_input - timedelta(days=365)
+        run_label = "Run Analysis"
 
     run_btn = st.button(run_label, type="primary", use_container_width=True)
 
 # ---------------------------------------------------------
-# 4. 데이터 로딩 (종목 추가됨)
+# 4. Data Loading
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_data(universe_type, start_date, end_date):
-    # 기본 선물 종목
-    tickers_futures = {
+    tickers_core = {
         '005930.KS': '삼성전자', '000660.KS': 'SK하이닉스', '005380.KS': '현대차', '000270.KS': '기아',
         '005490.KS': 'POSCO홀딩스', '006400.KS': '삼성SDI', '051910.KS': 'LG화학', '035420.KS': 'NAVER',
         '035720.KS': '카카오', '105560.KS': 'KB금융', '055550.KS': '신한지주', '086790.KS': '하나금융지주',
-        '000810.KS': '삼성화재', '032830.KS': '삼성생명', '015760.KS': '한국전력', '034020.KS': 'SK', # SK지주사
-        '003550.KS': 'LG', '009150.KS': '삼성전기', '011070.KS': 'LG이노텍', '034220.KS': 'LG디스플레이',
-        '012330.KS': '현대모비스', '009540.KS': 'HD한국조선해양', '042660.KS': '한화오션', '010140.KS': '삼성중공업',
-        '373220.KS': 'LG에너지솔루션', '247540.KQ': '에코프로비엠', '086520.KQ': '에코프로', '042700.KS': '한미반도체', # 한미반도체 추가
-        '005935.KS': '삼성전자우', '005387.KS': '현대차2우B', '051915.KS': 'LG화학우' # 우선주 추가
+        '000810.KS': '삼성화재', '005830.KS': 'DB손해보험', '032830.KS': '삼성생명', '015760.KS': '한국전력',
+        '034020.KS': '두산에너빌리티', '012330.KS': '현대모비스', '009540.KS': 'HD한국조선해양', '042660.KS': '한화오션',
+        '010140.KS': '삼성중공업', '329180.KS': 'HD현대중공업', '011200.KS': 'HMM', '003490.KS': '대한항공',
+        '030200.KS': 'KT', '017670.KS': 'SK텔레콤', '032640.KS': 'LG유플러스', '009150.KS': '삼성전기',
+        '011070.KS': 'LG이노텍', '018260.KS': '삼성SDS', '259960.KS': '크래프톤', '036570.KS': '엔씨소프트',
+        '251270.KS': '넷마블', '090430.KS': '아모레퍼시픽', '051900.KS': 'LG생활건강', '097950.KS': 'CJ제일제당',
+        '010130.KS': '고려아연', '004020.KS': '현대제철', '010950.KS': 'S-Oil', '096770.KS': 'SK이노베이션',
+        '323410.KS': '카카오뱅크', '377300.KS': '카카오페이', '034730.KS': 'SK', '003550.KS': 'LG',
+        '028260.KS': '삼성물산', '000880.KS': '한화', '267260.KS': 'HD현대', '001040.KS': 'CJ'
     }
-    
-    # 추가 종목들 (생략 없이 주요 종목 포함)
-    additional = {
-        '207940.KS': '삼성바이오로직스', '068270.KS': '셀트리온', '000100.KS': '유한양행', '128940.KS': '한미약품',
-        '316140.KS': '우리금융지주', '000120.KS': 'CJ대한통운', '028670.KS': '팬오션', '010120.KS': 'LS ELECTRIC',
+    tickers_growth = {
+        '247540.KQ': '에코프로비엠', '086520.KQ': '에코프로', '066970.KQ': '엘앤에프', '028300.KQ': 'HLB',
+        '293490.KQ': '카카오게임즈', '035900.KQ': 'JYP Ent.', '041510.KQ': '에스엠', '122870.KQ': '와이지엔터테인먼트',
+        '352820.KS': '하이브', '042700.KS': '한미반도체', '028300.KQ': 'HLB'
+    }
+    tickers_pref = {
+        '005935.KS': '삼성전자우', '005387.KS': '현대차2우B', '005385.KS': '현대차우',
+        '051915.KS': 'LG화학우', '066575.KS': 'LG전자우', '006405.KS': '삼성SDI우',
+        '090435.KS': '아모레퍼시픽우'
+    }
+    tickers_value = {
+        '373220.KS': 'LG에너지솔루션', '207940.KS': '삼성바이오로직스', '068270.KS': '셀트리온',
+        '000100.KS': '유한양행', '128940.KS': '한미약품', '316140.KS': '우리금융지주',
+        '000120.KS': 'CJ대한통운', '028670.KS': '팬오션', '010120.KS': 'LS ELECTRIC',
         '021240.KS': '코웨이', '033780.KS': 'KT&G', '004370.KS': '농심', '007310.KS': '오뚜기',
-        '097950.KS': 'CJ제일제당', '001040.KS': 'CJ', '003670.KS': 'POSCO퓨처엠', '006260.KS': 'LS'
+        '003670.KS': 'POSCO퓨처엠', '006260.KS': 'LS', '012450.KS': '한화에어로스페이스',
+        '047810.KS': '한국항공우주', '079550.KS': 'LIG넥스원', '064350.KS': '현대로템',
+        '086280.KS': '현대글로비스', '011210.KS': '현대위아', '139480.KS': '이마트', '023530.KS': '롯데쇼핑',
+        '000080.KS': '하이트진로', '005300.KS': '롯데칠성', '007890.KS': '한국금융지주', '006800.KS': '미래에셋증권',
+        '039490.KS': '키움증권', '034220.KS': 'LG디스플레이', '066570.KS': 'LG전자', '000150.KS': '두산'
     }
     
-    manual_tickers = {**tickers_futures, **additional} if "상위 100" in universe_type else tickers_futures
+    full_tickers = {**tickers_core, **tickers_growth, **tickers_pref, **tickers_value}
     
+    manual_tickers = full_tickers if "Top 100" in universe_type else {**tickers_core, **tickers_growth}
+
     fetch_start = (pd.to_datetime(start_date) - timedelta(days=365)).strftime('%Y-%m-%d')
     fetch_end = pd.to_datetime(end_date).strftime('%Y-%m-%d')
     
     try:
-        # 지수(^KS11) 포함
         df_all = yf.download(list(manual_tickers.keys()) + ['^KS11'], start=fetch_start, end=fetch_end, progress=False)['Close']
         kospi = df_all['^KS11'].rename('KOSPI')
         stocks = df_all.drop(columns=['^KS11']).rename(columns=manual_tickers)
         stocks = stocks.ffill().bfill().dropna(axis=1, how='any')
         return stocks, kospi, manual_tickers
-    except: return pd.DataFrame(), pd.Series(), {}
+    except:
+        return pd.DataFrame(), pd.Series(), {}
 
 # ---------------------------------------------------------
-# 5. 분석 엔진 (태깅 로직 포함)
+# 5. Analysis Engine (Simplified Z-Threshold)
 # ---------------------------------------------------------
-def run_analysis(df_prices, window, entry, exit, stop, p_val, start, end):
+def run_analysis(df_prices, window, threshold, p_val, start, end):
     pairs = []
     cols = df_prices.columns
     target_mask = (df_prices.index >= pd.to_datetime(start)) & (df_prices.index <= pd.to_datetime(end))
-    prog_bar = st.progress(0, text="종목 간의 통계적 관계를 계산하고 있습니다...")
+    
+    prog_bar = st.progress(0, text="Scanning Market Data...")
     checked = 0; total = len(cols) * (len(cols) - 1) // 2
     
     for i in range(len(cols)):
@@ -237,29 +261,29 @@ def run_analysis(df_prices, window, entry, exit, stop, p_val, start, end):
                     log_a, log_b = np.log(df_prices[sa]), np.log(df_prices[sb])
                     spread = log_a - log_b
                     mean, std = spread.rolling(window).mean(), spread.rolling(window).std()
-                    z_all = (spread - mean) / std; z_target = z_all.loc[target_mask]
+                    z_all = (spread - mean) / std
+                    z_target = z_all.loc[target_mask]
                     if z_target.empty: continue
                     
+                    # Simplified Logic: Enter at +/- Threshold, Exit at 0
                     positions = np.zeros(len(z_target)); curr_pos = 0
                     for k in range(len(z_target)):
                         z = z_target.iloc[k]
                         if curr_pos == 0:
-                            if z < -entry: curr_pos = 1
-                            elif z > entry: curr_pos = -1
+                            if z < -threshold: curr_pos = 1  # Long Spread
+                            elif z > threshold: curr_pos = -1 # Short Spread
                         elif curr_pos == 1:
-                            if z >= -exit or z < -stop: curr_pos = 0
+                            if z >= 0: curr_pos = 0 # Exit at Mean
                         elif curr_pos == -1:
-                            if z <= exit or z > stop: curr_pos = 0
+                            if z <= 0: curr_pos = 0 # Exit at Mean
                         positions[k] = curr_pos
                     
                     ret_a, ret_b = df_prices[sa].loc[target_mask].pct_change().fillna(0), df_prices[sb].loc[target_mask].pct_change().fillna(0)
                     spr_ret = (ret_a - ret_b) * pd.Series(positions, index=z_target.index).shift(1).fillna(0).values
-                    
-                    # [NEW] 태그 가져오기
                     tag = get_pair_tag(sa, sb)
                     
                     pairs.append({
-                        'Stock A': sa, 'Stock B': sb, 'Tag': tag, # 태그 추가
+                        'Stock A': sa, 'Stock B': sb, 'Tag': tag,
                         'Z-Score': z_all.iloc[-1], 'Corr': corr, 'P-value': pval,
                         'Final_Ret': (1 + spr_ret).prod() - 1, 'Daily_Ret_Series': pd.Series(spr_ret, index=z_target.index),
                         'Spread': spread, 'Mean': mean, 'Std': std, 'Analysis_Dates': z_target.index,
@@ -272,91 +296,111 @@ def run_analysis(df_prices, window, entry, exit, stop, p_val, start, end):
     return pd.DataFrame(pairs)
 
 # ---------------------------------------------------------
-# 6. 시각화 함수 (태그 표시 추가)
+# 6. Visualization (No Emojis)
 # ---------------------------------------------------------
-def plot_pair_analysis(row, df_prices, entry):
+def plot_pair_analysis(row, df_prices, threshold):
     sa, sb = row['Stock A'], row['Stock B']
     dates = row['Analysis_Dates']
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.25, 0.25])
+    
     pa, pb = df_prices[sa].loc[dates], df_prices[sb].loc[dates]
     fig.add_trace(go.Scatter(x=dates, y=(pa/pa.iloc[0])*100, name=sa, line=dict(color='#3B82F6', width=1.5)), row=1, col=1)
     fig.add_trace(go.Scatter(x=dates, y=(pb/pb.iloc[0])*100, name=sb, line=dict(color='#F59E0B', width=1.5)), row=1, col=1)
+    
     z_vals = ((row['Spread'] - row['Mean']) / row['Std']).loc[dates]
     fig.add_trace(go.Scatter(x=dates, y=z_vals, name='Z-Score', line=dict(color='#9CA3AF', width=1)), row=2, col=1)
     
-    sell_sig = z_vals[z_vals > entry]; buy_sig = z_vals[z_vals < -entry]
-    fig.add_trace(go.Scatter(x=sell_sig.index, y=sell_sig, mode='markers', marker=dict(color='#EF4444', size=5), name='매도', showlegend=False), row=2, col=1)
-    fig.add_trace(go.Scatter(x=buy_sig.index, y=buy_sig, mode='markers', marker=dict(color='#3B82F6', size=5), name='매수', showlegend=False), row=2, col=1)
+    # Markers
+    sell_sig = z_vals[z_vals > threshold]; buy_sig = z_vals[z_vals < -threshold]
+    fig.add_trace(go.Scatter(x=sell_sig.index, y=sell_sig, mode='markers', marker=dict(color='#EF4444', size=5), name='Sell', showlegend=False), row=2, col=1)
+    fig.add_trace(go.Scatter(x=buy_sig.index, y=buy_sig, mode='markers', marker=dict(color='#3B82F6', size=5), name='Buy', showlegend=False), row=2, col=1)
     
-    fig.add_hline(y=entry, line_dash="dash", line_color="#EF4444", row=2, col=1)
-    fig.add_hline(y=-entry, line_dash="dash", line_color="#3B82F6", row=2, col=1)
-    fig.add_hrect(y0=-entry, y1=entry, fillcolor="gray", opacity=0.1, line_width=0, row=2, col=1)
+    # Threshold Lines
+    fig.add_hline(y=threshold, line_dash="dash", line_color="#EF4444", row=2, col=1)
+    fig.add_hline(y=-threshold, line_dash="dash", line_color="#3B82F6", row=2, col=1)
+    fig.add_hrect(y0=-threshold, y1=threshold, fillcolor="gray", opacity=0.1, line_width=0, row=2, col=1)
     
     cum = (1 + row['Daily_Ret_Series']).cumprod() * 100 - 100
-    fig.add_trace(go.Scatter(x=dates, y=cum, name='수익률 %', line=dict(color='#10B981', width=1.5), fill='tozeroy'), row=3, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=cum, name='Return %', line=dict(color='#10B981', width=1.5), fill='tozeroy'), row=3, col=1)
     
-    # 제목에 태그 포함
     title_text = f"<b>[{row['Tag']}] {sa} vs {sb}</b>"
     fig.update_layout(title=title_text, height=600, template="plotly_dark", plot_bgcolor='#1A1C24', paper_bgcolor='#1A1C24', margin=dict(t=50, b=10))
     return fig
 
+def plot_scatter(results):
+    if results.empty: return None
+    fig = px.scatter(
+        results, x='Corr', y=results['Z-Score'].abs(), color='P-value',
+        hover_data=['Stock A', 'Stock B', 'Tag'],
+        title='Opportunity Map', labels={'Corr': 'Correlation', 'y': 'Abs Z-Score'},
+        color_continuous_scale='Blues_r', template='plotly_dark'
+    )
+    fig.add_shape(type="rect", x0=0.8, y0=2.0, x1=1.0, y1=results['Z-Score'].abs().max() + 0.5,
+        line=dict(color="#10B981", width=1, dash="dot"), fillcolor="#10B981", opacity=0.1)
+    fig.update_layout(height=400, plot_bgcolor='#1A1C24', paper_bgcolor='#1A1C24')
+    return fig
+
 # ---------------------------------------------------------
-# 7. 메인 실행
+# 7. Main Execution
 # ---------------------------------------------------------
 if run_btn:
-    with st.spinner("시장 데이터 스캔 및 그룹핑 분석 중..."):
+    with st.spinner("Processing Market Data..."):
         df_prices, df_kospi, ticker_map = load_data(universe_mode, start_input, end_input)
-    if df_prices.empty: st.error("데이터 로드 실패")
+    if df_prices.empty: st.error("Data Load Failed")
     else:
         results = run_analysis(df_prices, window_size, entry_z, exit_z, stop_loss_z, p_cutoff, start_input, end_input)
+        
         def fmt(name):
             code = {v: k for k, v in ticker_map.items()}.get(name, '').split('.')[0]
             return f"{name} ({code})"
         
-        if results.empty: st.warning("조건에 부합하는 페어가 없습니다.")
-        elif app_mode == "백테스트 (Backtest)":
+        if results.empty: st.warning("No pairs found matching criteria.")
+        elif app_mode == "Backtest":
             k_period = df_kospi.loc[start_input:end_input]; k_ret = (k_period / k_period.iloc[0]) - 1
             all_ret = pd.DataFrame(index=k_period.index)
             for _, row in results.iterrows(): all_ret[f"{row['Stock A']}-{row['Stock B']}"] = row['Daily_Ret_Series'].reindex(all_ret.index).fillna(0)
             p_daily = all_ret.mean(axis=1); p_cum = (1 + p_daily).cumprod() - 1
             
-            st.subheader("📊 전략 vs 시장(KOSPI) 성과 리포트")
+            st.subheader("Performance Report (vs KOSPI)")
             c1, c2, c3 = st.columns(3)
             s_final, k_final = p_cum.iloc[-1]*100, k_ret.iloc[-1]*100
-            c1.metric("내 전략 수익률", f"{s_final:.2f}%", f"{s_final-k_final:.2f}% vs 시장")
-            c2.metric("KOSPI 지수 수익률", f"{k_final:.2f}%"); c3.metric("Alpha (초과수익)", f"{s_final-k_final:.2f}%p")
+            c1.metric("Strategy Return", f"{s_final:.2f}%", f"{s_final-k_final:.2f}% vs Market")
+            c2.metric("KOSPI Return", f"{k_final:.2f}%"); c3.metric("Alpha", f"{s_final-k_final:.2f}%p")
             
             fig_comp = go.Figure()
-            fig_comp.add_trace(go.Scatter(x=p_cum.index, y=p_cum*100, name='내 전략', line=dict(color='#10B981', width=3)))
-            fig_comp.add_trace(go.Scatter(x=k_ret.index, y=k_ret*100, name='시장 지수(KOSPI)', line=dict(color='#9CA3AF', width=2, dash='dot')))
-            fig_comp.update_layout(title="누적 수익률 비교 차트", template="plotly_dark", height=400, plot_bgcolor='#1A1C24', paper_bgcolor='#1A1C24')
+            fig_comp.add_trace(go.Scatter(x=p_cum.index, y=p_cum*100, name='Strategy', line=dict(color='#10B981', width=3)))
+            fig_comp.add_trace(go.Scatter(x=k_ret.index, y=k_ret*100, name='KOSPI', line=dict(color='#9CA3AF', width=2, dash='dot')))
+            fig_comp.update_layout(title="Cumulative Return Comparison", template="plotly_dark", height=400, plot_bgcolor='#1A1C24', paper_bgcolor='#1A1C24')
             st.plotly_chart(fig_comp, use_container_width=True)
+            
+            st.plotly_chart(plot_scatter(results), use_container_width=True)
 
             st.divider()
             col_t, col_w = st.columns(2)
             with col_t:
-                st.subheader("🏆 베스트 퍼포머 (Top 5)")
+                st.subheader("Top Performers")
                 for _, row in results.sort_values('Final_Ret', ascending=False).head(5).iterrows():
                     with st.expander(f"{row['Tag']} | {fmt(row['Stock A'])} / {fmt(row['Stock B'])} ({row['Final_Ret']*100:.1f}%)"):
                         st.plotly_chart(plot_pair_analysis(row, df_prices, entry_z), use_container_width=True)
             with col_w:
-                st.subheader("💀 워스트 퍼포머 (Worst 5)")
+                st.subheader("Worst Performers")
                 for _, row in results.sort_values('Final_Ret', ascending=True).head(5).iterrows():
                     with st.expander(f"{row['Tag']} | {fmt(row['Stock A'])} / {fmt(row['Stock B'])} ({row['Final_Ret']*100:.1f}%)"):
                         st.plotly_chart(plot_pair_analysis(row, df_prices, entry_z), use_container_width=True)
         else:
-            st.subheader("🔥 실시간 시장 매매 신호")
+            st.subheader("Live Trading Signals")
             actives = results[results['Z-Score'].abs() >= entry_z]
-            col1, col2 = st.columns([3, 1]); col1.markdown(f"**{len(results)}개**의 유효 페어를 감시 중입니다."); col2.metric("진입 신호", f"{len(actives)}건")
-            tab1, tab2 = st.tabs(["⚡ 진입 신호 (Signals)", "📡 전체 감시 리스트 (Watchlist)"])
+            col1, col2 = st.columns([3, 1]); col1.markdown(f"**{len(results)}** pairs monitored."); col2.metric("Active Signals", f"{len(actives)}")
+            tab1, tab2 = st.tabs(["Action Required", "Watchlist"])
             with tab1:
                 if not actives.empty:
                     for _, row in actives.sort_values(by='Z-Score', key=abs, ascending=False).iterrows():
                         with st.expander(f"🎯 [{row['Tag']}] {fmt(row['Stock A'])} / {fmt(row['Stock B'])} (Z: {row['Z-Score']:.2f})", expanded=True):
                             st.plotly_chart(plot_pair_analysis(row, df_prices, entry_z), use_container_width=True)
-                else: st.info("현재 진입 조건을 만족하는 종목이 없습니다.")
+                else: st.info("No signals matching current threshold.")
             with tab2:
+                st.plotly_chart(plot_scatter(results), use_container_width=True)
                 df_v = results[['Tag', 'Stock A', 'Stock B', 'Z-Score', 'Corr', 'Price A', 'Price B']].copy()
                 df_v['Stock A'] = df_v['Stock A'].apply(fmt); df_v['Stock B'] = df_v['Stock B'].apply(fmt)
                 st.dataframe(df_v.sort_values('Z-Score', key=abs, ascending=False), use_container_width=True)
-else: st.info("👈 설정을 확인하고 분석 시작 버튼을 눌러주세요.")
+else: st.info("Ready. Configure settings and click Run.")
