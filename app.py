@@ -8,14 +8,17 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import yfinance as yf
 import warnings
+import time
+import random
 
 warnings.filterwarnings('ignore')
 
 # ---------------------------------------------------------
-# 1. UI Settings (No Emojis, Professional Look)
+# 1. Clean & Minimalist UI Settings
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Pair Trading Scanner",
+    page_icon="🔎",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -24,42 +27,23 @@ st.markdown("""
 <style>
     .stApp { background-color: #1A1C24; color: #E0E0E0; font-family: 'Pretendard', sans-serif; }
     section[data-testid="stSidebar"] { background-color: #111317; border-right: 1px solid #2B2D35; }
-    div[data-testid="metric-container"] { background-color: #252830; border: 1px solid #363945; border-radius: 4px; padding: 15px; }
-    
-    /* 버튼 스타일 조정 (작고 깔끔하게) */
-    div.stButton > button { 
-        background-color: #374151; 
-        color: white; 
-        border: 1px solid #4B5563; 
-        border-radius: 4px; 
-        font-size: 0.8rem;
-    }
+    div[data-testid="metric-container"] { background-color: #252830; border: 1px solid #363945; border-radius: 8px; padding: 15px; }
+    div.stButton > button { background-color: #374151; color: white; border: 1px solid #4B5563; border-radius: 4px; font-size: 0.8rem; }
     div.stButton > button:hover { background-color: #4B5563; }
-    
-    h1, h2, h3 { color: #F3F4F6 !important; font-weight: 600 !important; }
-    
-    /* 태그 뱃지 스타일 */
-    .tag-badge {
-        background-color: #3B82F6;
-        color: white;
-        padding: 2px 6px;
-        border-radius: 4px;
-        font-size: 0.75rem;
-        font-weight: 500;
-        margin-right: 6px;
-    }
+    h1, h2, h3 { color: #F3F4F6 !important; font-weight: 700 !important; }
+    .tag-badge { background-color: #3B82F6; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: 500; margin-right: 6px; }
 </style>
 """, unsafe_allow_html=True)
 
 # 기본값 정의 (단순화됨)
 DEFAULTS = {
     "window_size": 60,
-    "z_threshold": 2.0, # 하나로 통합
+    "z_threshold": 2.0, # entry_z 등을 이것 하나로 통합
     "p_cutoff": 0.05
 }
 
 # ---------------------------------------------------------
-# 2. Logic Engine (Clean Tags)
+# 2. Logic Engine (태깅 시스템)
 # ---------------------------------------------------------
 RELATIONSHIP_MAP = [
     # 1. Parent-Child
@@ -131,10 +115,10 @@ def get_pair_tag(stock_a, stock_b):
     for pair_set, tag_name in RELATIONSHIP_MAP:
         if current_set == pair_set:
             return tag_name
-    return "Random" # 수정됨
+    return "Random" 
 
 # ---------------------------------------------------------
-# 3. Sidebar (Cleaned)
+# 3. Sidebar (Simplified)
 # ---------------------------------------------------------
 with st.sidebar:
     st.header("Settings")
@@ -146,7 +130,6 @@ with st.sidebar:
     
     total_capital = st.number_input("Capital (KRW)", value=10000000, step=1000000, format="%d")
     
-    # "Parameters"로 이름 변경 및 초기화 버튼 이동
     with st.expander("Parameters", expanded=True):
         # Session State Init
         for key in DEFAULTS:
@@ -155,13 +138,12 @@ with st.sidebar:
 
         window_size = st.slider("Window Size", 20, 120, key="window_size")
         
-        # Z-Score 하나만 남김
-        z_threshold = st.slider("Z-Score Threshold", 1.0, 4.0, key="z_threshold", help="Entry level. Exit is at 0.")
+        # Z-Score 하나만 사용
+        z_threshold = st.slider("Z-Score Threshold", 1.0, 4.0, key="z_threshold", help="Entry at Threshold, Exit at 0.")
         
         p_cutoff = st.slider("Max P-value", 0.01, 0.30, key="p_cutoff")
         
-        st.write("") # 간격
-        # 초기화 버튼 축소 및 이동
+        st.write("") 
         if st.button("Reset Parameters"):
             for key, value in DEFAULTS.items():
                 st.session_state[key] = value
@@ -183,7 +165,7 @@ with st.sidebar:
     run_btn = st.button(run_label, type="primary", use_container_width=True)
 
 # ---------------------------------------------------------
-# 4. Data Loading
+# 4. Data Loading (Extended List)
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_data(universe_type, start_date, end_date):
@@ -224,7 +206,6 @@ def load_data(universe_type, start_date, end_date):
     }
     
     full_tickers = {**tickers_core, **tickers_growth, **tickers_pref, **tickers_value}
-    
     manual_tickers = full_tickers if "Top 100" in universe_type else {**tickers_core, **tickers_growth}
 
     fetch_start = (pd.to_datetime(start_date) - timedelta(days=365)).strftime('%Y-%m-%d')
@@ -240,8 +221,9 @@ def load_data(universe_type, start_date, end_date):
         return pd.DataFrame(), pd.Series(), {}
 
 # ---------------------------------------------------------
-# 5. Analysis Engine (Simplified Z-Threshold)
+# 5. Analysis Engine (Fix: Correct Parameter Mapping)
 # ---------------------------------------------------------
+# [중요 수정] 이제 threshold 변수 하나만 받아서 내부에서 처리합니다.
 def run_analysis(df_prices, window, threshold, p_val, start, end):
     pairs = []
     cols = df_prices.columns
@@ -249,6 +231,11 @@ def run_analysis(df_prices, window, threshold, p_val, start, end):
     
     prog_bar = st.progress(0, text="Scanning Market Data...")
     checked = 0; total = len(cols) * (len(cols) - 1) // 2
+    
+    # Implicit Settings based on single threshold
+    entry_z = threshold
+    exit_z = 0.0        # Mean reversion
+    stop_loss_z = 4.0   # Hard stop
     
     for i in range(len(cols)):
         for j in range(i + 1, len(cols)):
@@ -265,17 +252,17 @@ def run_analysis(df_prices, window, threshold, p_val, start, end):
                     z_target = z_all.loc[target_mask]
                     if z_target.empty: continue
                     
-                    # Simplified Logic: Enter at +/- Threshold, Exit at 0
+                    # Backtest Logic
                     positions = np.zeros(len(z_target)); curr_pos = 0
                     for k in range(len(z_target)):
                         z = z_target.iloc[k]
                         if curr_pos == 0:
-                            if z < -threshold: curr_pos = 1  # Long Spread
-                            elif z > threshold: curr_pos = -1 # Short Spread
+                            if z < -entry_z: curr_pos = 1 
+                            elif z > entry_z: curr_pos = -1
                         elif curr_pos == 1:
-                            if z >= 0: curr_pos = 0 # Exit at Mean
+                            if z >= exit_z or z < -stop_loss_z: curr_pos = 0
                         elif curr_pos == -1:
-                            if z <= 0: curr_pos = 0 # Exit at Mean
+                            if z <= exit_z or z > stop_loss_z: curr_pos = 0
                         positions[k] = curr_pos
                     
                     ret_a, ret_b = df_prices[sa].loc[target_mask].pct_change().fillna(0), df_prices[sb].loc[target_mask].pct_change().fillna(0)
@@ -296,7 +283,7 @@ def run_analysis(df_prices, window, threshold, p_val, start, end):
     return pd.DataFrame(pairs)
 
 # ---------------------------------------------------------
-# 6. Visualization (No Emojis)
+# 6. Visualization
 # ---------------------------------------------------------
 def plot_pair_analysis(row, df_prices, threshold):
     sa, sb = row['Stock A'], row['Stock B']
@@ -315,7 +302,6 @@ def plot_pair_analysis(row, df_prices, threshold):
     fig.add_trace(go.Scatter(x=sell_sig.index, y=sell_sig, mode='markers', marker=dict(color='#EF4444', size=5), name='Sell', showlegend=False), row=2, col=1)
     fig.add_trace(go.Scatter(x=buy_sig.index, y=buy_sig, mode='markers', marker=dict(color='#3B82F6', size=5), name='Buy', showlegend=False), row=2, col=1)
     
-    # Threshold Lines
     fig.add_hline(y=threshold, line_dash="dash", line_color="#EF4444", row=2, col=1)
     fig.add_hline(y=-threshold, line_dash="dash", line_color="#3B82F6", row=2, col=1)
     fig.add_hrect(y0=-threshold, y1=threshold, fillcolor="gray", opacity=0.1, line_width=0, row=2, col=1)
@@ -348,7 +334,8 @@ if run_btn:
         df_prices, df_kospi, ticker_map = load_data(universe_mode, start_input, end_input)
     if df_prices.empty: st.error("Data Load Failed")
     else:
-        results = run_analysis(df_prices, window_size, entry_z, exit_z, stop_loss_z, p_cutoff, start_input, end_input)
+        # [FIX] Pass single threshold parameter
+        results = run_analysis(df_prices, window_size, z_threshold, p_cutoff, start_input, end_input)
         
         def fmt(name):
             code = {v: k for k, v in ticker_map.items()}.get(name, '').split('.')[0]
@@ -381,22 +368,22 @@ if run_btn:
                 st.subheader("Top Performers")
                 for _, row in results.sort_values('Final_Ret', ascending=False).head(5).iterrows():
                     with st.expander(f"{row['Tag']} | {fmt(row['Stock A'])} / {fmt(row['Stock B'])} ({row['Final_Ret']*100:.1f}%)"):
-                        st.plotly_chart(plot_pair_analysis(row, df_prices, entry_z), use_container_width=True)
+                        st.plotly_chart(plot_pair_analysis(row, df_prices, z_threshold), use_container_width=True)
             with col_w:
                 st.subheader("Worst Performers")
                 for _, row in results.sort_values('Final_Ret', ascending=True).head(5).iterrows():
                     with st.expander(f"{row['Tag']} | {fmt(row['Stock A'])} / {fmt(row['Stock B'])} ({row['Final_Ret']*100:.1f}%)"):
-                        st.plotly_chart(plot_pair_analysis(row, df_prices, entry_z), use_container_width=True)
+                        st.plotly_chart(plot_pair_analysis(row, df_prices, z_threshold), use_container_width=True)
         else:
             st.subheader("Live Trading Signals")
-            actives = results[results['Z-Score'].abs() >= entry_z]
+            actives = results[results['Z-Score'].abs() >= z_threshold]
             col1, col2 = st.columns([3, 1]); col1.markdown(f"**{len(results)}** pairs monitored."); col2.metric("Active Signals", f"{len(actives)}")
             tab1, tab2 = st.tabs(["Action Required", "Watchlist"])
             with tab1:
                 if not actives.empty:
                     for _, row in actives.sort_values(by='Z-Score', key=abs, ascending=False).iterrows():
                         with st.expander(f"🎯 [{row['Tag']}] {fmt(row['Stock A'])} / {fmt(row['Stock B'])} (Z: {row['Z-Score']:.2f})", expanded=True):
-                            st.plotly_chart(plot_pair_analysis(row, df_prices, entry_z), use_container_width=True)
+                            st.plotly_chart(plot_pair_analysis(row, df_prices, z_threshold), use_container_width=True)
                 else: st.info("No signals matching current threshold.")
             with tab2:
                 st.plotly_chart(plot_scatter(results), use_container_width=True)
