@@ -282,8 +282,6 @@ def plot_chart(row, df_prices, entry, exit, stop, mode):
     
     # 1. Price
     pa, pb = df_prices[sa].loc[dates], df_prices[sb].loc[dates]
-    
-    # 정규화
     pa_norm = (pa / pa.iloc[0]) * 100
     pb_norm = (pb / pb.iloc[0]) * 100
     
@@ -296,8 +294,7 @@ def plot_chart(row, df_prices, entry, exit, stop, mode):
     # Z-Score Line
     fig.add_trace(go.Scatter(x=dates, y=z_vals, name='Z-Score', line=dict(color='#9CA3AF', width=1)), row=2, col=1)
     
-    # Signal Markers (Overbought/Oversold)
-    # Z > entry : Sell Signal (Overbought) -> Red Marker
+    # Signal Markers
     sell_sig = z_vals[z_vals > entry]
     fig.add_trace(go.Scatter(
         x=sell_sig.index, y=sell_sig,
@@ -305,7 +302,6 @@ def plot_chart(row, df_prices, entry, exit, stop, mode):
         name='매도 신호 (Sell)', showlegend=False
     ), row=2, col=1)
     
-    # Z < -entry : Buy Signal (Oversold) -> Blue Marker
     buy_sig = z_vals[z_vals < -entry]
     fig.add_trace(go.Scatter(
         x=buy_sig.index, y=buy_sig,
@@ -318,7 +314,7 @@ def plot_chart(row, df_prices, entry, exit, stop, mode):
     fig.add_hline(y=-entry, line_dash="dash", line_color="#3B82F6", row=2, col=1)
     fig.add_hline(y=0, line_color="gray", line_width=1, row=2, col=1)
     
-    # Safe Zone Background (Between Thresholds)
+    # Safe Zone Background
     fig.add_hrect(
         y0=-entry, y1=entry,
         fillcolor="gray", opacity=0.1, line_width=0,
@@ -339,23 +335,35 @@ def plot_chart(row, df_prices, entry, exit, stop, mode):
     )
     return fig
 
-# [NEW] 히트맵 차트 함수
-def plot_heatmap(results):
+# [NEW] Scatter Plot (Opportunity Map)
+def plot_scatter(results):
     if results.empty: return None
-    top_pairs = results.sort_values(by='Z-Score', key=abs, ascending=False).head(10)
-    data = []
-    for idx, row in top_pairs.iterrows():
-        data.append({'Pair': f"{row['Stock A']}/{row['Stock B']}", 'Z-Score': row['Z-Score']})
     
-    df_heat = pd.DataFrame(data)
-    fig = go.Figure(data=go.Heatmap(
-        z=df_heat['Z-Score'], x=df_heat['Pair'], y=['괴리율 강도'],
-        colorscale='Blues', zmid=0
-    ))
+    # 색상 기준: P-value가 낮을수록(0에 가까울수록) 진한 파란색
+    fig = px.scatter(
+        results,
+        x='Corr',
+        y=results['Z-Score'].abs(),
+        color='P-value',
+        hover_data=['Stock A', 'Stock B', 'Z-Score'],
+        title='기회 포착 산점도 (Opportunity Map)',
+        labels={'Corr': '상관계수 (안정성)', 'y': '괴리율 (수익성)'},
+        color_continuous_scale='Blues_r', # Reverse Blues (Low P is dark)
+        template='plotly_dark'
+    )
+    
+    # 우상단(Best Zone) 강조 박스
+    fig.add_shape(type="rect",
+        x0=0.8, y0=2.0, x1=1.0, y1=results['Z-Score'].abs().max() + 0.5,
+        line=dict(color="#10B981", width=2, dash="dot"),
+        fillcolor="#10B981", opacity=0.1
+    )
+    
     fig.update_layout(
-        title=dict(text="상위 페어 괴리율 히트맵", font=dict(size=16, color="white")),
-        height=300, template="plotly_dark", 
-        plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
+        height=400,
+        plot_bgcolor='#1A1C24', paper_bgcolor='#1A1C24',
+        xaxis=dict(range=[0.5, 1.05]), # 상관계수 0.5 이상만 의미 있음
+        font=dict(family="Pretendard, sans-serif")
     )
     return fig
 
@@ -407,7 +415,8 @@ if run_btn:
                 fig_eq.update_layout(title="포트폴리오 누적 수익률", template="plotly_dark", height=350, plot_bgcolor='#1A1C24', paper_bgcolor='#1A1C24')
                 st.plotly_chart(fig_eq, use_container_width=True)
 
-                st.plotly_chart(plot_heatmap(results), use_container_width=True)
+                # [Modified] Scatter Plot instead of Heatmap
+                st.plotly_chart(plot_scatter(results), use_container_width=True)
 
                 st.markdown("---")
                 st.subheader("🏆 베스트 퍼포머 (Top 5)")
@@ -451,7 +460,9 @@ if run_btn:
                         st.info("현재 진입 조건(Z-Score)을 만족하는 종목이 없습니다.")
                 
                 with tab2:
-                    st.plotly_chart(plot_heatmap(results), use_container_width=True)
+                    # [Modified] Scatter Plot
+                    st.plotly_chart(plot_scatter(results), use_container_width=True)
+                    
                     df_disp = results[['Stock A', 'Stock B', 'Z-Score', 'P-value', 'Corr']].copy()
                     df_disp['Stock A'] = df_disp['Stock A'].apply(fmt)
                     df_disp['Stock B'] = df_disp['Stock B'].apply(fmt)
