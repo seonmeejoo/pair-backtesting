@@ -14,7 +14,7 @@ import os
 import time
 
 # ==========================================
-# 🎨 0. 스타일 설정 (Dark & Neon)
+# 🎨 0. 스타일 설정
 # ==========================================
 def init_settings():
     font_path = "NanumGothic.ttf"
@@ -47,7 +47,7 @@ def init_settings():
 init_settings()
 
 # ==========================================
-# 📡 1. 데이터 수집 ("기타" 제외)
+# 📡 1. 데이터 수집
 # ==========================================
 @st.cache_data(ttl=3600*12)
 def fetch_all_naver_stocks():
@@ -67,9 +67,7 @@ def fetch_all_naver_stocks():
             link_tag = cols[0].find('a')
             if link_tag:
                 sec_name = link_tag.text.strip()
-                # 🚫 [수정] "기타" 섹터는 수집 단계에서 제외
-                if "기타" in sec_name:
-                    continue
+                if "기타" in sec_name: continue
                 sector_links.append((sec_name, "https://finance.naver.com" + link_tag['href']))
         
         all_data = []
@@ -97,7 +95,7 @@ def fetch_all_naver_stocks():
                         'Code': name_tag['href'].split('code=')[-1],
                         'Price': s_cols[1].text.strip()
                     })
-            time.sleep(0.02)
+            time.sleep(0.01) # 딜레이 최소화
             
         progress_bar.empty()
         status_text.empty()
@@ -107,7 +105,6 @@ def fetch_all_naver_stocks():
         status_text.text("💰 Fetching Market Cap Data...")
         df_krx = fdr.StockListing('KRX')[['Code', 'Marcap']]
         df_merged = pd.merge(df_naver, df_krx, on='Code', how='left').fillna({'Marcap': 0})
-        
         df_merged = df_merged.sort_values(by=['Sector', 'Marcap'], ascending=[True, False])
         
         def format_marcap(val):
@@ -146,7 +143,11 @@ def fetch_price_history(codes_list, start_date):
     status_text.empty()
     return pd.DataFrame(data_dict).dropna()
 
-def run_pair_analysis(price_df, stocks_info, p_thresh, z_thresh):
+def run_pair_analysis(price_df, stocks_info, corr_thresh, z_thresh):
+    """ 
+    [수정됨] 공적분(Cointegration) 필터 제거 -> 상관계수(Correlation) 중심 로직
+    이유: 같은 섹터 내 종목들이라도 엄격한 공적분 테스트를 통과하기 힘듦.
+    """
     pairs = []
     sectors = stocks_info['Sector'].unique()
     
@@ -157,38 +158,46 @@ def run_pair_analysis(price_df, stocks_info, p_thresh, z_thresh):
         if len(valid_codes) < 2: continue
         
         for s1, s2 in combinations(valid_codes, 2):
-            # 💡 [Upgrade] 로그 수익률 기반 분석 (왜곡 방지)
+            # 로그 수익률 사용
             series1 = np.log(price_df[s1])
             series2 = np.log(price_df[s2])
             
             if len(series1) < 30 or series1.std() == 0 or series2.std() == 0: continue
             
-            # 💡 [Upgrade] 상관계수 기준 완화 (0.7)
-            if series1.corr(series2) < 0.7: continue
+            # 🔥 [핵심] 상관계수 체크 (User Setting)
+            corr = series1.corr(series2)
+            if corr < corr_thresh: continue 
 
+            # 공적분은 '참고용'으로 계산만 함 (필터링 X)
             try:
                 score, p_value, _ = coint(series1, series2)
-                if p_value < p_thresh:
-                    name1 = sector_stocks[sector_stocks['Code'] == s1]['Name'].values[0]
-                    name2 = sector_stocks[sector_stocks['Code'] == s2]['Name'].values[0]
-                    
-                    x = sm.add_constant(series2)
-                    model = sm.OLS(series1, x).fit()
-                    
-                    if len(model.params) < 2: continue
-                    hedge_ratio = model.params.iloc[1]
-                    
-                    spread = series1 - (hedge_ratio * series2)
-                    z_score = (spread.iloc[-1] - spread.mean()) / spread.std()
-                    
-                    pairs.append({
-                        'Sector': sector, 
-                        'Stock1': name1, 'Stock2': name2,
-                        'Code1': s1, 'Code2': s2,
-                        'P_value': p_value, 'Current_Z': z_score,
-                        'Spread_Series': spread
-                    })
+            except:
+                p_value = 1.0 # 에러나면 P-value 높게 설정
+            
+            # Spread 계산
+            try:
+                x = sm.add_constant(series2)
+                model = sm.OLS(series1, x).fit()
+                hedge_ratio = model.params.iloc[1] if len(model.params) > 1 else 1.0
+                
+                spread = series1 - (hedge_ratio * series2)
+                z_score = (spread.iloc[-1] - spread.mean()) / spread.std()
+                
+                # 결과 저장
+                name1 = sector_stocks[sector_stocks['Code'] == s1]['Name'].values[0]
+                name2 = sector_stocks[sector_stocks['Code'] == s2]['Name'].values[0]
+
+                pairs.append({
+                    'Sector': sector, 
+                    'Stock1': name1, 'Stock2': name2,
+                    'Code1': s1, 'Code2': s2,
+                    'Correlation': corr,   # 상관계수 추가
+                    'P_value': p_value,    # 참고용
+                    'Current_Z': z_score,
+                    'Spread_Series': spread
+                })
             except: continue
+            
     return pd.DataFrame(pairs)
 
 # ==========================================
@@ -204,7 +213,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📊 Pair Scanner Terminal")
-st.markdown("Top-Down Approach: **Scan Market** ➔ **Select Sector** ➔ **Find Alpha**")
+st.markdown("Strategy: **Correlation First** (Find similar moves) ➔ **Z-Score Divergence** (Trade the spread)")
 
 if 'all_market_data' not in st.session_state:
     st.session_state.all_market_data = None
@@ -214,7 +223,7 @@ if 'analysis_results' not in st.session_state:
 # -------------------------------------------------------------------
 # [STEP 1] Data Fetching
 # -------------------------------------------------------------------
-st.header("1️⃣ Market Scan (Data Ingestion)")
+st.header("1️⃣ Market Scan")
 col_btn, col_msg = st.columns([1, 4])
 
 with col_btn:
@@ -226,142 +235,139 @@ with col_btn:
 with col_msg:
     if st.session_state.all_market_data is not None:
         raw_df = st.session_state.all_market_data
-        st.success(f"✅ Data Ready: {raw_df['Sector'].nunique()} Sectors (Excluded 'Others') / {len(raw_df)} Stocks")
+        st.success(f"✅ Ready: {len(raw_df)} stocks across {raw_df['Sector'].nunique()} sectors")
     else:
-        st.info("Click the button to fetch market data (Approx. 30s)")
+        st.info("Start by scanning the market data.")
 
 # 요약 보기
 if st.session_state.all_market_data is not None:
     raw_df = st.session_state.all_market_data
-    
     sector_counts = raw_df['Sector'].value_counts()
     
-    tab_chart, tab_table = st.tabs(["📊 Sector Distribution (Count)", "📂 Market Leaders (Top 5)"])
+    tab_chart, tab_table = st.tabs(["📊 Sector Count", "📂 Top 5 Leaders"])
     
     with tab_chart:
         st.bar_chart(sector_counts, color="#ff9900")
         
     with tab_table:
-        st.markdown("##### 🔢 Sector Stock Counts (Summary)")
+        st.markdown("##### 🔢 Sector Stock Counts")
         count_df = sector_counts.reset_index()
-        count_df.columns = ['Sector', 'Total Stocks']
+        count_df.columns = ['Sector', 'Count']
         st.dataframe(count_df, use_container_width=True, hide_index=True, height=200)
         
         st.divider()
-        
-        st.markdown("##### 🏆 Market Leaders (Top 5 by Market Cap)")
+        st.markdown("##### 🏆 Sector Leaders (Top 5)")
         display_df = raw_df.groupby('Sector').head(5)
-        st.dataframe(
-            display_df[['Sector', 'Name', 'Price', 'Market Cap']], 
-            use_container_width=True,
-            column_config={
-                "Sector": "Sector", "Name": "Name",
-                "Price": "Price", "Market Cap": "Market Cap"
-            },
-            hide_index=True
-        )
+        st.dataframe(display_df[['Sector', 'Name', 'Price', 'Market Cap']], use_container_width=True, hide_index=True)
 
 # -------------------------------------------------------------------
 # [STEP 2] Analysis
 # -------------------------------------------------------------------
 st.divider()
-st.header("2️⃣ Sector Deep Dive")
+st.header("2️⃣ Deep Dive & Analysis")
 
 if st.session_state.all_market_data is not None:
     raw_df = st.session_state.all_market_data
     all_sectors = raw_df['Sector'].unique().tolist()
-    
     sector_count_map = raw_df['Sector'].value_counts().to_dict()
     
     selected_sectors = st.multiselect(
         "Select Target Sectors:", all_sectors,
-        format_func=lambda x: f"{x} ({sector_count_map.get(x, 0)} stocks)",
+        format_func=lambda x: f"{x} ({sector_count_map.get(x, 0)})",
         default=all_sectors[:1] if len(all_sectors) > 0 else None
     )
     
     c1, c2, c3 = st.columns(3)
-    # 💡 [Default] 조회기간 180일, 상관계수 0.7, P-value 0.1로 완화 (페어 더 많이 잡히게)
-    lookback = c1.slider("Lookback Period (Days)", 100, 730, 180) 
+    # 💡 [설정 변경] P-value 입력창 제거 -> Correlation 입력창 추가
+    lookback = c1.slider("Lookback (Days)", 60, 365, 120, help="짧을수록 최근 트렌드 반영 (추천: 120일)") 
     z_thresh = c2.number_input("Z-Score Threshold", 1.5, 4.0, 2.0, 0.1)
-    p_thresh = c3.number_input("P-value Threshold", 0.01, 0.2, 0.1, 0.01)
+    corr_thresh = c3.slider("Min Correlation", 0.5, 0.99, 0.7, 0.05, help="낮을수록 더 많은 페어가 검색됩니다.")
     
-    if st.button("🚀 Run Pair Analysis", type="primary"):
+    if st.button("🚀 Run Scanner", type="primary"):
         if not selected_sectors:
-            st.warning("Please select at least one sector.")
+            st.warning("Select a sector first.")
         else:
             target_stocks_info = raw_df[raw_df['Sector'].isin(selected_sectors)]
-            st.info(f"🧐 Analyzing {len(target_stocks_info)} stocks in selected sectors (Log-Price Model)...")
+            st.info(f"Scanning {len(target_stocks_info)} stocks... (Correlation > {corr_thresh})")
             
             start_date = (datetime.now() - timedelta(days=lookback)).strftime('%Y-%m-%d')
             price_df = fetch_price_history(target_stocks_info['Code'].tolist(), start_date)
             
             if price_df.empty:
-                st.error("Failed to fetch price data.")
+                st.error("No price data.")
             else:
-                with st.spinner("Calculating Correlations & Cointegration..."):
-                    results = run_pair_analysis(price_df, target_stocks_info, p_thresh, z_thresh)
+                with st.spinner("Finding correlated pairs..."):
+                    results = run_pair_analysis(price_df, target_stocks_info, corr_thresh, z_thresh)
                     st.session_state.analysis_results = (results, price_df)
 
 # -------------------------------------------------------------------
-# [STEP 3] Visualization
+# [STEP 3] Results
 # -------------------------------------------------------------------
 if st.session_state.analysis_results is not None:
     results, price_df = st.session_state.analysis_results
     
     if not results.empty:
+        # P-value 0.1 미만이면 'Safety' 마크, 아니면 주의
+        results['Stat_Safety'] = np.where(results['P_value'] < 0.1, "✅ Safe", "⚠️ Risky")
+        
         signals = results[abs(results['Current_Z']) >= z_thresh].copy()
         signals['Signal'] = np.where(signals['Current_Z'] > 0, "SHORT A / LONG B", "LONG A / SHORT B")
+        # 정렬: 상관계수 높은 순
+        signals = signals.sort_values(by='Correlation', ascending=False)
         
         st.divider()
-        st.subheader(f"📊 Results: {len(results)} Pairs Identified")
+        st.subheader(f"📊 Identified Pairs: {len(results)} Total")
         
-        tab1, tab2 = st.tabs(["🔥 ACTIVE SIGNALS", "👀 WATCHLIST"])
+        tab1, tab2 = st.tabs(["🔥 Active Signals (Z-Score Hit)", "👀 Watchlist (Waiting)"])
         
         def draw_pair_chart(pair_data, price_df, z_limit):
             s1, s2 = pair_data['Code1'], pair_data['Code2']
             n1, n2 = pair_data['Stock1'], pair_data['Stock2']
             spread = pair_data['Spread_Series']
             
-            # 💡 [Upgrade] 차트는 '누적 수익률(%)'로 변환하여 비교 (직관적)
+            # 누적 수익률 비교
             p1 = (price_df[s1] / price_df[s1].iloc[0] - 1) * 100
             p2 = (price_df[s2] / price_df[s2].iloc[0] - 1) * 100
             
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
             
-            ax1.plot(p1, color='#00ffcc', label=f"{n1} (Return %)", linewidth=2) 
-            ax1.plot(p2, color='#ff00ff', label=f"{n2} (Return %)", linewidth=2)
-            ax1.set_title(f"CUMULATIVE RETURNS: {n1} vs {n2}", color='#ff9900', fontsize=16, pad=15)
-            ax1.legend(facecolor='#1e1e1e', edgecolor='#444444')
-            ax1.grid(True, linestyle='--', alpha=0.3)
+            ax1.plot(p1, color='#00ffcc', label=f"{n1} ({pair_data['Correlation']:.2f})", linewidth=2) 
+            ax1.plot(p2, color='#ff00ff', label=f"{n2}", linewidth=2)
+            ax1.set_title(f"Cumulative Returns: {n1} vs {n2}", color='#ff9900', fontsize=16)
+            ax1.legend(facecolor='#1e1e1e')
+            ax1.grid(True, alpha=0.3)
             
             z_score = (spread - spread.mean()) / spread.std()
-            ax2.plot(z_score, color='#ffff00', label='Spread Z-Score', linewidth=1.5)
-            ax2.axhline(z_limit, color='red', linestyle='--', linewidth=1)
-            ax2.axhline(-z_limit, color='red', linestyle='--', linewidth=1)
-            ax2.axhline(0, color='gray', linestyle='-', alpha=0.5)
+            ax2.plot(z_score, color='#ffff00', label='Spread Z-Score')
+            ax2.axhline(z_limit, c='r', ls='--'); ax2.axhline(-z_limit, c='r', ls='--'); ax2.axhline(0, c='gray')
+            ax2.fill_between(z_score.index, z_limit, z_score, where=(z_score>=z_limit), color='red', alpha=0.3)
+            ax2.fill_between(z_score.index, -z_limit, z_score, where=(z_score<=-z_limit), color='red', alpha=0.3)
+            ax2.set_title(f"Spread Z-Score: {pair_data['Current_Z']:.2f} (P-val: {pair_data['P_value']:.3f})", color='#ff9900')
             
-            ax2.fill_between(z_score.index, z_limit, z_score, where=(z_score >= z_limit), color='red', alpha=0.3)
-            ax2.fill_between(z_score.index, -z_limit, z_score, where=(z_score <= -z_limit), color='red', alpha=0.3)
-            ax2.set_title(f"LOG-SPREAD Z-SCORE (Current: {pair_data['Current_Z']:.2f})", color='#ff9900', fontsize=12)
-            
-            plt.tight_layout()
             st.pyplot(fig)
 
         with tab1:
             if signals.empty:
-                st.info("No active signals found matching criteria.")
+                st.info("No signals above Z-Score threshold.")
             else:
-                st.dataframe(signals[['Sector', 'Stock1', 'Stock2', 'Current_Z', 'Signal', 'P_value']], use_container_width=True, hide_index=True)
-                sel_sig = st.selectbox("Select Pair to Visualize:", signals.index, format_func=lambda i: f"{signals.loc[i,'Stock1']} vs {signals.loc[i,'Stock2']}", key='sig_sel')
-                draw_pair_chart(signals.loc[sel_sig], price_df, z_thresh)
+                # 테이블 컬럼 직관적으로 변경
+                st.dataframe(
+                    signals[['Stock1', 'Stock2', 'Correlation', 'Current_Z', 'Stat_Safety', 'Signal']], 
+                    use_container_width=True, hide_index=True
+                )
+                sel = st.selectbox("Visualize Pair:", signals.index, format_func=lambda i: f"{signals.loc[i,'Stock1']} - {signals.loc[i,'Stock2']}", key='s1')
+                draw_pair_chart(signals.loc[sel], price_df, z_thresh)
 
         with tab2:
-            watchlist = results[abs(results['Current_Z']) < z_thresh].sort_values('P_value')
+            watchlist = results[abs(results['Current_Z']) < z_thresh].sort_values('Correlation', ascending=False)
             if watchlist.empty:
-                st.info("Watchlist empty.")
+                st.info("Empty watchlist.")
             else:
-                st.dataframe(watchlist[['Sector', 'Stock1', 'Stock2', 'Current_Z', 'P_value']], use_container_width=True)
-                sel_watch = st.selectbox("Select Pair to Visualize:", watchlist.index, format_func=lambda i: f"{watchlist.loc[i,'Stock1']} vs {watchlist.loc[i,'Stock2']}", key='watch_sel')
-                draw_pair_chart(watchlist.loc[sel_watch], price_df, z_thresh)
+                st.dataframe(
+                    watchlist[['Stock1', 'Stock2', 'Correlation', 'Current_Z', 'Stat_Safety']], 
+                    use_container_width=True, hide_index=True
+                )
+                sel = st.selectbox("Visualize Pair:", watchlist.index, format_func=lambda i: f"{watchlist.loc[i,'Stock1']} - {watchlist.loc[i,'Stock2']}", key='w1')
+                draw_pair_chart(watchlist.loc[sel], price_df, z_thresh)
     else:
-        st.warning("No pairs found. Try relaxing the correlation or p-value thresholds.")
+        st.warning("No pairs found. Try lowering Correlation threshold (e.g. 0.6).")
