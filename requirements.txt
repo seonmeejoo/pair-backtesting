@@ -10,3 +10,5 @@ requests
 plotly
 pykrx
 yfinance
+seaborn
+beautifulsoup4
