@@ -264,10 +264,10 @@ with col_msg:
 
 # [Display] 요약 리스트 (Top 5 Display ONLY)
 if st.session_state.all_market_data is not None:
-    st.markdown("##### 📂 섹터별 대장주 요약 (Top 5 by Market Cap)")
+    st.markdown("##### 📂 섹터별 대장주 요약 (Top 3 by Market Cap)")
     
-    # 데이터는 전체를 가지고 있지만, 보여주는 건 섹터별 Top 5만
-    display_df = st.session_state.all_market_data.groupby('Sector').head(5)
+    # 데이터는 전체를 가지고 있지만, 보여주는 건 섹터별 Top 3만
+    display_df = st.session_state.all_market_data.groupby('Sector').head(3)
     
     with st.expander("리스트 펼쳐보기", expanded=True):
         st.dataframe(
