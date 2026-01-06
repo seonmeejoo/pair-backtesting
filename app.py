@@ -14,10 +14,9 @@ import os
 import time
 
 # ==========================================
-# 🛠️ [필수] 한글 폰트 자동 설정 (무조건 작동함)
+# 🛠️ [필수] 한글 폰트 자동 설정
 # ==========================================
 def init_font():
-    # 폰트 파일이 없으면 구글에서 다운로드
     font_path = "NanumGothic.ttf"
     if not os.path.exists(font_path):
         url = "https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf"
@@ -25,17 +24,16 @@ def init_font():
         with open(font_path, "wb") as f:
             f.write(response.content)
             
-    # 폰트 등록
     fm.fontManager.addfont(font_path)
     plt.rc('font', family='NanumGothic')
     plt.rcParams['axes.unicode_minus'] = False 
 
-init_font() # 앱 시작 시 실행
+init_font()
 
 # ==========================================
-# 📡 데이터 크롤링 및 분석 함수 (캐싱 적용)
+# 📡 데이터 크롤링 및 분석 함수
 # ==========================================
-@st.cache_data(ttl=3600*12) # 12시간 캐시
+@st.cache_data(ttl=3600*12)
 def get_naver_sectors(limit_sectors=None):
     base_url = "https://finance.naver.com/sise/sise_group.naver?type=upjong"
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -80,7 +78,7 @@ def get_naver_sectors(limit_sectors=None):
                         'Name': name_tag.text.strip(),
                         'Code': name_tag['href'].split('code=')[-1]
                     })
-            time.sleep(0.05) # 차단 방지
+            time.sleep(0.05)
             
         progress_bar.empty()
         status_text.empty()
@@ -92,7 +90,6 @@ def get_naver_sectors(limit_sectors=None):
 
 @st.cache_data(ttl=3600)
 def fetch_prices(stock_list, start_date, top_n=5):
-    # 섹터별 상위 N개만
     target_df = stock_list.groupby('Sector').head(top_n)
     codes = target_df['Code'].tolist()
     data_dict = {}
@@ -129,7 +126,6 @@ def analyze_pairs(price_df, valid_stocks, p_val_thresh, z_score_thresh):
             series1 = price_df[s1]
             series2 = price_df[s2]
             
-            # 상관계수 필터
             if series1.corr(series2) < 0.8: continue
 
             score, p_value, _ = coint(series1, series2)
@@ -171,21 +167,17 @@ with st.sidebar:
     run_btn = st.button("🚀 스캔 시작", type="primary")
 
 if run_btn:
-    # 1. 크롤링
     stocks_df = get_naver_sectors(limit_sectors)
     st.success(f"✅ {len(stocks_df)}개 종목 정보 확보 완료")
     
-    # 2. 데이터 다운로드
     start_date = (datetime.now() - timedelta(days=lookback)).strftime('%Y-%m-%d')
     price_df, valid_stocks = fetch_prices(stocks_df, start_date)
     st.success(f"✅ 주가 데이터 다운로드 완료 (총 {len(price_df.columns)} 종목)")
     
-    # 3. 분석
     with st.spinner("🧠 통계 분석 및 페어 탐색 중..."):
         results = analyze_pairs(price_df, valid_stocks, p_thresh, z_thresh)
     
     if not results.empty:
-        # 시그널 분리
         signals = results[abs(results['Current_Z']) >= z_thresh].copy()
         signals['Action'] = np.where(signals['Current_Z'] > 0, 
                                      "Short A / Long B", 
@@ -193,55 +185,88 @@ if run_btn:
         
         watchlist = results[abs(results['Current_Z']) < z_thresh].sort_values('P_value')
         
-        # --- 결과 화면 ---
         col1, col2 = st.columns(2)
         col1.metric("발견된 총 페어", f"{len(results)}개")
         col2.metric("🚀 진입 추천 시그널", f"{len(signals)}개", delta_color="inverse")
         
         tab1, tab2 = st.tabs(["🔥 진입 시그널 (Action)", "👀 관심 종목 (Watchlist)"])
         
+        # ---------------------------
+        # Tab 1: Signals
+        # ---------------------------
         with tab1:
             if not signals.empty:
                 st.dataframe(signals[['Sector', 'Stock1', 'Stock2', 'Current_Z', 'Action', 'P_value']], use_container_width=True)
                 
                 st.subheader("📊 상세 차트 분석")
-                selected_pair_idx = st.selectbox("차트를 볼 페어를 선택하세요", signals.index, format_func=lambda x: f"{signals.loc[x, 'Stock1']} vs {signals.loc[x, 'Stock2']}")
+                # Key 추가: 위젯 ID 중복 방지
+                sel_idx = st.selectbox("차트를 볼 페어를 선택하세요", signals.index, 
+                                       format_func=lambda x: f"{signals.loc[x, 'Stock1']} vs {signals.loc[x, 'Stock2']}",
+                                       key="sig_select")
                 
-                # 차트 그리기
-                pair = signals.loc[selected_pair_idx]
+                pair = signals.loc[sel_idx]
                 s1, s2 = pair['Code1'], pair['Code2']
                 spread = pair['Spread_Series']
                 
                 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
                 
-                # 정규화 차트
                 p1 = price_df[s1] / price_df[s1].iloc[0] * 100
                 p2 = price_df[s2] / price_df[s2].iloc[0] * 100
                 
                 ax1.plot(p1, label=pair['Stock1'], color='blue')
                 ax1.plot(p2, label=pair['Stock2'], color='orange')
                 ax1.set_title(f"Price Trend: {pair['Stock1']} vs {pair['Stock2']} ({pair['Sector']})")
-                ax1.legend()
-                ax1.grid(True, alpha=0.3)
+                ax1.legend(); ax1.grid(True, alpha=0.3)
                 
-                # Z-Score 차트
                 z_score_series = (spread - spread.mean()) / spread.std()
                 ax2.plot(z_score_series, color='green', label='Spread Z-Score')
-                ax2.axhline(z_thresh, c='r', ls='--')
-                ax2.axhline(-z_thresh, c='r', ls='--')
-                ax2.axhline(0, c='k', alpha=0.5)
-                ax2.set_title(f"Spread Z-Score (Current: {pair['Current_Z']})")
+                ax2.axhline(z_thresh, c='r', ls='--'); ax2.axhline(-z_thresh, c='r', ls='--'); ax2.axhline(0, c='k', alpha=0.5)
                 ax2.fill_between(z_score_series.index, z_thresh, z_score_series, where=(z_score_series >= z_thresh), color='red', alpha=0.3)
                 ax2.fill_between(z_score_series.index, -z_thresh, z_score_series, where=(z_score_series <= -z_thresh), color='red', alpha=0.3)
-                ax2.legend()
-                ax2.grid(True, alpha=0.3)
-                
+                ax2.set_title(f"Spread Z-Score (Current: {pair['Current_Z']})")
+                ax2.legend(); ax2.grid(True, alpha=0.3)
                 st.pyplot(fig)
             else:
                 st.info("현재 진입 조건(Z-score)을 만족하는 종목이 없습니다.")
 
+        # ---------------------------
+        # Tab 2: Watchlist (업데이트됨 ✨)
+        # ---------------------------
         with tab2:
             st.dataframe(watchlist[['Sector', 'Stock1', 'Stock2', 'Current_Z', 'P_value']], use_container_width=True)
+            
+            if not watchlist.empty:
+                st.divider()
+                st.subheader("📊 상세 차트 분석 (Watchlist)")
+                
+                # Key를 다르게 설정 (watch_select)
+                w_idx = st.selectbox("차트를 볼 페어를 선택하세요", watchlist.index, 
+                                     format_func=lambda x: f"{watchlist.loc[x, 'Stock1']} vs {watchlist.loc[x, 'Stock2']}",
+                                     key="watch_select")
+                
+                w_pair = watchlist.loc[w_idx]
+                ws1, ws2 = w_pair['Code1'], w_pair['Code2']
+                w_spread = w_pair['Spread_Series']
+                
+                fig_w, (wax1, wax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+                
+                wp1 = price_df[ws1] / price_df[ws1].iloc[0] * 100
+                wp2 = price_df[ws2] / price_df[ws2].iloc[0] * 100
+                
+                wax1.plot(wp1, label=w_pair['Stock1'], color='blue')
+                wax1.plot(wp2, label=w_pair['Stock2'], color='orange')
+                wax1.set_title(f"Price Trend: {w_pair['Stock1']} vs {w_pair['Stock2']} ({w_pair['Sector']})")
+                wax1.legend(); wax1.grid(True, alpha=0.3)
+                
+                w_z_series = (w_spread - w_spread.mean()) / w_spread.std()
+                wax2.plot(w_z_series, color='green', label='Spread Z-Score')
+                wax2.axhline(z_thresh, c='r', ls='--'); wax2.axhline(-z_thresh, c='r', ls='--'); wax2.axhline(0, c='k', alpha=0.5)
+                wax2.set_title(f"Spread Z-Score (Current: {w_pair['Current_Z']})")
+                wax2.legend(); wax2.grid(True, alpha=0.3)
+                
+                st.pyplot(fig_w)
+            else:
+                st.info("현재 Watchlist에 해당하는 종목이 없습니다.")
 
     else:
         st.warning("조건에 맞는 페어를 찾지 못했습니다. 업종 개수를 늘리거나 조건을 완화해보세요.")
