@@ -152,8 +152,8 @@ st.set_page_config(page_title="Pairs Trading Scanner", layout="wide", page_icon=
 
 st.title("📈 Sector-based Pair Trading Scanner")
 st.markdown("""
-네이버 금융의 업종 데이터를 분석하여, **높은 상관관계(Correlation)**를 가진 종목 중 
-**일시적 가격 괴리(Spread)**가 발생한 **유망 Pair**를 실시간으로 발굴합니다.
+네이버 금융의 업종 데이터를 분석하여, **높은 상관관계**를 가진 종목 중 
+**일시적 가격 괴리(Spread)**가 발생한 **Pair 종목**을 실시간으로 발굴합니다.
 """)
 
 # --- 세션 상태 초기화 (데이터 저장소) ---
