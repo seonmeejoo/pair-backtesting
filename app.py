@@ -47,7 +47,7 @@ def init_settings():
 init_settings()
 
 # ==========================================
-# 📡 1. 데이터 수집
+# 📡 1. 데이터 수집 ("기타" 제외)
 # ==========================================
 @st.cache_data(ttl=3600*12)
 def fetch_all_naver_stocks():
@@ -66,7 +66,11 @@ def fetch_all_naver_stocks():
             if len(cols) < 2: continue
             link_tag = cols[0].find('a')
             if link_tag:
-                sector_links.append((link_tag.text.strip(), "https://finance.naver.com" + link_tag['href']))
+                sec_name = link_tag.text.strip()
+                # 🚫 [수정] "기타" 섹터는 수집 단계에서 제외
+                if "기타" in sec_name:
+                    continue
+                sector_links.append((sec_name, "https://finance.naver.com" + link_tag['href']))
         
         all_data = []
         progress_bar = st.progress(0)
@@ -129,7 +133,7 @@ def fetch_price_history(codes_list, start_date):
     total = len(codes_list)
     
     for i, code in enumerate(codes_list):
-        if i % 5 == 0: 
+        if i % 10 == 0: 
             status_text.text(f"📉 Downloading Prices: {i+1}/{total}")
             progress_bar.progress((i + 1) / total)
         try:
@@ -153,14 +157,13 @@ def run_pair_analysis(price_df, stocks_info, p_thresh, z_thresh):
         if len(valid_codes) < 2: continue
         
         for s1, s2 in combinations(valid_codes, 2):
-            # [핵심 변경 1] 가격 자체(Price) 대신 로그 가격(Log Price) 사용
-            # 이유: 10만원짜리와 1만원짜리 주식의 등락폭 왜곡을 없앰
+            # 💡 [Upgrade] 로그 수익률 기반 분석 (왜곡 방지)
             series1 = np.log(price_df[s1])
             series2 = np.log(price_df[s2])
             
             if len(series1) < 30 or series1.std() == 0 or series2.std() == 0: continue
             
-            # [핵심 변경 2] 상관계수 기준 완화 (0.8 -> 0.7)
+            # 💡 [Upgrade] 상관계수 기준 완화 (0.7)
             if series1.corr(series2) < 0.7: continue
 
             try:
@@ -175,7 +178,6 @@ def run_pair_analysis(price_df, stocks_info, p_thresh, z_thresh):
                     if len(model.params) < 2: continue
                     hedge_ratio = model.params.iloc[1]
                     
-                    # Spread = Log(A) - beta * Log(B)
                     spread = series1 - (hedge_ratio * series2)
                     z_score = (spread.iloc[-1] - spread.mean()) / spread.std()
                     
@@ -184,11 +186,11 @@ def run_pair_analysis(price_df, stocks_info, p_thresh, z_thresh):
                         'Stock1': name1, 'Stock2': name2,
                         'Code1': s1, 'Code2': s2,
                         'P_value': p_value, 'Current_Z': z_score,
-                        'Spread_Series': spread 
+                        'Spread_Series': spread
                     })
             except: continue
     return pd.DataFrame(pairs)
-    
+
 # ==========================================
 # 🖥️ UI: Pair Scanner Terminal
 # ==========================================
@@ -224,7 +226,7 @@ with col_btn:
 with col_msg:
     if st.session_state.all_market_data is not None:
         raw_df = st.session_state.all_market_data
-        st.success(f"✅ Data Ready: {raw_df['Sector'].nunique()} Sectors / {len(raw_df)} Stocks")
+        st.success(f"✅ Data Ready: {raw_df['Sector'].nunique()} Sectors (Excluded 'Others') / {len(raw_df)} Stocks")
     else:
         st.info("Click the button to fetch market data (Approx. 30s)")
 
@@ -240,24 +242,13 @@ if st.session_state.all_market_data is not None:
         st.bar_chart(sector_counts, color="#ff9900")
         
     with tab_table:
-        # 🌟 [NEW] 섹터별 종목 수 요약 테이블 (Top 5 위에 배치)
         st.markdown("##### 🔢 Sector Stock Counts (Summary)")
-        
-        # 카운트 데이터프레임 생성
         count_df = sector_counts.reset_index()
         count_df.columns = ['Sector', 'Total Stocks']
+        st.dataframe(count_df, use_container_width=True, hide_index=True, height=200)
         
-        # 테이블 높이를 제한(height=200)하여 너무 많은 공간을 차지하지 않게 함
-        st.dataframe(
-            count_df, 
-            use_container_width=True, 
-            hide_index=True, 
-            height=200 
-        )
+        st.divider()
         
-        st.divider() # 구분선
-        
-        # 기존 Top 5 테이블
         st.markdown("##### 🏆 Market Leaders (Top 5 by Market Cap)")
         display_df = raw_df.groupby('Sector').head(5)
         st.dataframe(
@@ -289,16 +280,17 @@ if st.session_state.all_market_data is not None:
     )
     
     c1, c2, c3 = st.columns(3)
-    lookback = c1.slider("Lookback Period (Days)", 100, 730, 365)
+    # 💡 [Default] 조회기간 180일, 상관계수 0.7, P-value 0.1로 완화 (페어 더 많이 잡히게)
+    lookback = c1.slider("Lookback Period (Days)", 100, 730, 180) 
     z_thresh = c2.number_input("Z-Score Threshold", 1.5, 4.0, 2.0, 0.1)
-    p_thresh = c3.number_input("P-value Threshold", 0.01, 0.1, 0.05, 0.01)
+    p_thresh = c3.number_input("P-value Threshold", 0.01, 0.2, 0.1, 0.01)
     
     if st.button("🚀 Run Pair Analysis", type="primary"):
         if not selected_sectors:
             st.warning("Please select at least one sector.")
         else:
             target_stocks_info = raw_df[raw_df['Sector'].isin(selected_sectors)]
-            st.info(f"🧐 Analyzing {len(target_stocks_info)} stocks in selected sectors...")
+            st.info(f"🧐 Analyzing {len(target_stocks_info)} stocks in selected sectors (Log-Price Model)...")
             
             start_date = (datetime.now() - timedelta(days=lookback)).strftime('%Y-%m-%d')
             price_df = fetch_price_history(target_stocks_info['Code'].tolist(), start_date)
@@ -330,18 +322,17 @@ if st.session_state.analysis_results is not None:
             n1, n2 = pair_data['Stock1'], pair_data['Stock2']
             spread = pair_data['Spread_Series']
             
-            # 시각화는 직관적인 '누적 수익률(%)'로 변환해서 보여줌
+            # 💡 [Upgrade] 차트는 '누적 수익률(%)'로 변환하여 비교 (직관적)
             p1 = (price_df[s1] / price_df[s1].iloc[0] - 1) * 100
             p2 = (price_df[s2] / price_df[s2].iloc[0] - 1) * 100
             
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
             
-            # Neon Style
-            ax1.plot(p1, color='#00ffcc', label=f"{n1} (Returns %)", linewidth=2) 
-            ax1.plot(p2, color='#ff00ff', label=f"{n2} (Returns %)", linewidth=2)
+            ax1.plot(p1, color='#00ffcc', label=f"{n1} (Return %)", linewidth=2) 
+            ax1.plot(p2, color='#ff00ff', label=f"{n2} (Return %)", linewidth=2)
             ax1.set_title(f"CUMULATIVE RETURNS: {n1} vs {n2}", color='#ff9900', fontsize=16, pad=15)
             ax1.legend(facecolor='#1e1e1e', edgecolor='#444444')
-            ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
+            ax1.grid(True, linestyle='--', alpha=0.3)
             
             z_score = (spread - spread.mean()) / spread.std()
             ax2.plot(z_score, color='#ffff00', label='Spread Z-Score', linewidth=1.5)
