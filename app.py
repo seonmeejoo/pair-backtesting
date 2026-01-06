@@ -151,31 +151,56 @@ def analyze_pairs(price_df, valid_stocks, p_val_thresh, z_score_thresh):
 st.set_page_config(page_title="Pairs Trading Scanner", layout="wide", page_icon="📈")
 
 st.title("📈 Sector-based Pair Trading Scanner")
-st.markdown("네이버 증권 업종 데이터를 기반으로 **상관관계가 높고 일시적으로 가격이 벌어진(Spread)** 주식 쌍을 찾습니다.")
+st.markdown("""
+네이버 금융의 업종 데이터를 분석하여, **높은 상관관계(Correlation)**를 가진 종목 중 
+**일시적 가격 괴리(Spread)**가 발생한 **유망 Pair**를 실시간으로 발굴합니다.
+""")
+
+# --- 세션 상태 초기화 (데이터 저장소) ---
+if 'price_df' not in st.session_state:
+    st.session_state.price_df = None
+if 'valid_stocks' not in st.session_state:
+    st.session_state.valid_stocks = None
+if 'data_downloaded' not in st.session_state:
+    st.session_state.data_downloaded = False
 
 with st.sidebar:
-    st.header("⚙️ 검색 옵션")
-    limit_sectors = st.slider("분석할 업종 개수 (속도 조절)", 5, 50, 10, help="상위 N개 업종만 분석합니다.")
-    lookback = st.slider("데이터 조회 기간 (일)", 100, 730, 365)
+    st.header("1️⃣ 데이터 준비 (Data Fetch)")
+    st.caption("먼저 데이터를 다운로드 받으세요. (시간 소요)")
+    limit_sectors = st.slider("업종 개수 (속도 조절)", 5, 50, 10)
+    lookback = st.slider("조회 기간 (일)", 100, 730, 365)
     
+    # [Step 1] 데이터 다운로드 버튼
+    if st.button("📥 데이터 가져오기", type="primary"):
+        stocks_df = get_naver_sectors(limit_sectors)
+        st.success(f"{len(stocks_df)}개 종목 목록 확보")
+        
+        start_date = (datetime.now() - timedelta(days=lookback)).strftime('%Y-%m-%d')
+        p_df, v_stocks = fetch_prices(stocks_df, start_date)
+        
+        # 세션에 저장!
+        st.session_state.price_df = p_df
+        st.session_state.valid_stocks = v_stocks
+        st.session_state.data_downloaded = True
+        st.rerun() # 화면 새로고침
+
     st.divider()
     
-    st.subheader("📊 통계 기준")
-    z_thresh = st.number_input("Z-Score 기준 (진입 시그널)", 1.5, 4.0, 2.0, 0.1)
-    p_thresh = st.number_input("P-value 기준 (공적분)", 0.01, 0.1, 0.05, 0.01)
-    
-    run_btn = st.button("🚀 스캔 시작", type="primary")
+    st.header("2️⃣ 전략 분석 (Analysis)")
+    st.caption("다운로드된 데이터로 조건을 변경하며 분석하세요.")
+    z_thresh = st.number_input("Z-Score 기준", 1.5, 4.0, 2.0, 0.1)
+    p_thresh = st.number_input("P-value 기준", 0.01, 0.1, 0.05, 0.01)
 
-if run_btn:
-    stocks_df = get_naver_sectors(limit_sectors)
-    st.success(f"✅ {len(stocks_df)}개 종목 정보 확보 완료")
+# --- 메인 로직 ---
+
+if st.session_state.data_downloaded:
+    # 데이터가 준비되었을 때만 실행
+    st.success(f"✅ 데이터 준비 완료! (보유 종목 수: {len(st.session_state.price_df.columns)}개)")
     
-    start_date = (datetime.now() - timedelta(days=lookback)).strftime('%Y-%m-%d')
-    price_df, valid_stocks = fetch_prices(stocks_df, start_date)
-    st.success(f"✅ 주가 데이터 다운로드 완료 (총 {len(price_df.columns)} 종목)")
-    
-    with st.spinner("🧠 통계 분석 및 페어 탐색 중..."):
-        results = analyze_pairs(price_df, valid_stocks, p_thresh, z_thresh)
+    # [Step 2] 분석은 버튼 없이 조건만 바꾸면 자동 실행 (또는 버튼 추가 가능)
+    # 여기서는 자동으로 매번 빠르게 계산
+    with st.spinner("⚡ 조건에 맞춰 분석 중..."):
+        results = analyze_pairs(st.session_state.price_df, st.session_state.valid_stocks, p_thresh, z_thresh)
     
     if not results.empty:
         signals = results[abs(results['Current_Z']) >= z_thresh].copy()
@@ -191,15 +216,12 @@ if run_btn:
         
         tab1, tab2 = st.tabs(["🔥 진입 시그널 (Action)", "👀 관심 종목 (Watchlist)"])
         
-        # ---------------------------
-        # Tab 1: Signals
-        # ---------------------------
+        # --- Tab 1 ---
         with tab1:
             if not signals.empty:
                 st.dataframe(signals[['Sector', 'Stock1', 'Stock2', 'Current_Z', 'Action', 'P_value']], use_container_width=True)
                 
                 st.subheader("📊 상세 차트 분석")
-                # Key 추가: 위젯 ID 중복 방지
                 sel_idx = st.selectbox("차트를 볼 페어를 선택하세요", signals.index, 
                                        format_func=lambda x: f"{signals.loc[x, 'Stock1']} vs {signals.loc[x, 'Stock2']}",
                                        key="sig_select")
@@ -210,8 +232,8 @@ if run_btn:
                 
                 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
                 
-                p1 = price_df[s1] / price_df[s1].iloc[0] * 100
-                p2 = price_df[s2] / price_df[s2].iloc[0] * 100
+                p1 = st.session_state.price_df[s1] / st.session_state.price_df[s1].iloc[0] * 100
+                p2 = st.session_state.price_df[s2] / st.session_state.price_df[s2].iloc[0] * 100
                 
                 ax1.plot(p1, label=pair['Stock1'], color='blue')
                 ax1.plot(p2, label=pair['Stock2'], color='orange')
@@ -227,19 +249,15 @@ if run_btn:
                 ax2.legend(); ax2.grid(True, alpha=0.3)
                 st.pyplot(fig)
             else:
-                st.info("현재 진입 조건(Z-score)을 만족하는 종목이 없습니다.")
+                st.info("설정된 Z-Score 기준을 만족하는 종목이 없습니다. 좌측 사이드바에서 기준을 낮춰보세요.")
 
-        # ---------------------------
-        # Tab 2: Watchlist (업데이트됨 ✨)
-        # ---------------------------
+        # --- Tab 2 ---
         with tab2:
             st.dataframe(watchlist[['Sector', 'Stock1', 'Stock2', 'Current_Z', 'P_value']], use_container_width=True)
             
             if not watchlist.empty:
                 st.divider()
                 st.subheader("📊 상세 차트 분석 (Watchlist)")
-                
-                # Key를 다르게 설정 (watch_select)
                 w_idx = st.selectbox("차트를 볼 페어를 선택하세요", watchlist.index, 
                                      format_func=lambda x: f"{watchlist.loc[x, 'Stock1']} vs {watchlist.loc[x, 'Stock2']}",
                                      key="watch_select")
@@ -250,8 +268,8 @@ if run_btn:
                 
                 fig_w, (wax1, wax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
                 
-                wp1 = price_df[ws1] / price_df[ws1].iloc[0] * 100
-                wp2 = price_df[ws2] / price_df[ws2].iloc[0] * 100
+                wp1 = st.session_state.price_df[ws1] / st.session_state.price_df[ws1].iloc[0] * 100
+                wp2 = st.session_state.price_df[ws2] / st.session_state.price_df[ws2].iloc[0] * 100
                 
                 wax1.plot(wp1, label=w_pair['Stock1'], color='blue')
                 wax1.plot(wp2, label=w_pair['Stock2'], color='orange')
@@ -263,13 +281,12 @@ if run_btn:
                 wax2.axhline(z_thresh, c='r', ls='--'); wax2.axhline(-z_thresh, c='r', ls='--'); wax2.axhline(0, c='k', alpha=0.5)
                 wax2.set_title(f"Spread Z-Score (Current: {w_pair['Current_Z']})")
                 wax2.legend(); wax2.grid(True, alpha=0.3)
-                
                 st.pyplot(fig_w)
             else:
-                st.info("현재 Watchlist에 해당하는 종목이 없습니다.")
-
+                st.info("조건에 맞는 Watchlist가 없습니다.")
     else:
-        st.warning("조건에 맞는 페어를 찾지 못했습니다. 업종 개수를 늘리거나 조건을 완화해보세요.")
+        st.warning("조건에 맞는 페어를 찾지 못했습니다.")
 
 else:
-    st.info("👈 왼쪽 사이드바에서 옵션을 설정하고 '스캔 시작' 버튼을 눌러주세요.")
+    # 데이터가 아직 없을 때 보여줄 화면
+    st.info("👈 왼쪽 사이드바에서 **'데이터 가져오기'** 버튼을 먼저 눌러주세요.")
