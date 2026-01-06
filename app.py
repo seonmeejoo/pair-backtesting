@@ -95,7 +95,7 @@ def fetch_all_naver_stocks():
                         'Code': name_tag['href'].split('code=')[-1],
                         'Price': s_cols[1].text.strip()
                     })
-            time.sleep(0.01) # 딜레이 최소화
+            time.sleep(0.01)
             
         progress_bar.empty()
         status_text.empty()
@@ -143,10 +143,12 @@ def fetch_price_history(codes_list, start_date):
     status_text.empty()
     return pd.DataFrame(data_dict).dropna()
 
-def run_pair_analysis(price_df, stocks_info, corr_thresh, z_thresh):
+def run_pair_analysis(price_df, stocks_info, p_thresh, z_thresh):
     """ 
-    [수정됨] 공적분(Cointegration) 필터 제거 -> 상관계수(Correlation) 중심 로직
-    이유: 같은 섹터 내 종목들이라도 엄격한 공적분 테스트를 통과하기 힘듦.
+    [복구됨] 공적분(Cointegration) 기반 로직
+    - 로그 수익률 사용
+    - 상관계수 0.7 이상 (1차 필터)
+    - 공적분 P-value < 0.1 (2차 필터 - 필수)
     """
     pairs = []
     sectors = stocks_info['Sector'].unique()
@@ -158,46 +160,42 @@ def run_pair_analysis(price_df, stocks_info, corr_thresh, z_thresh):
         if len(valid_codes) < 2: continue
         
         for s1, s2 in combinations(valid_codes, 2):
-            # 로그 수익률 사용
             series1 = np.log(price_df[s1])
             series2 = np.log(price_df[s2])
             
-            if len(series1) < 30 or series1.std() == 0 or series2.std() == 0: continue
+            if len(series1) < 20 or series1.std() == 0 or series2.std() == 0: continue
             
-            # 🔥 [핵심] 상관계수 체크 (User Setting)
-            corr = series1.corr(series2)
-            if corr < corr_thresh: continue 
+            # 1. 상관계수 필터 (기본적인 방향성 확인)
+            if series1.corr(series2) < 0.7: continue
 
-            # 공적분은 '참고용'으로 계산만 함 (필터링 X)
             try:
+                # 2. 공적분 테스트 (통계적 유의성 검증)
                 score, p_value, _ = coint(series1, series2)
-            except:
-                p_value = 1.0 # 에러나면 P-value 높게 설정
-            
-            # Spread 계산
-            try:
-                x = sm.add_constant(series2)
-                model = sm.OLS(series1, x).fit()
-                hedge_ratio = model.params.iloc[1] if len(model.params) > 1 else 1.0
                 
-                spread = series1 - (hedge_ratio * series2)
-                z_score = (spread.iloc[-1] - spread.mean()) / spread.std()
-                
-                # 결과 저장
-                name1 = sector_stocks[sector_stocks['Code'] == s1]['Name'].values[0]
-                name2 = sector_stocks[sector_stocks['Code'] == s2]['Name'].values[0]
-
-                pairs.append({
-                    'Sector': sector, 
-                    'Stock1': name1, 'Stock2': name2,
-                    'Code1': s1, 'Code2': s2,
-                    'Correlation': corr,   # 상관계수 추가
-                    'P_value': p_value,    # 참고용
-                    'Current_Z': z_score,
-                    'Spread_Series': spread
-                })
+                # 🔥 P-value 기준 만족 못하면 탈락 (Watchlist에도 안 넣음)
+                # 다만 기준을 0.05가 아니라 0.1 정도로 잡으면 많이 나옴
+                if p_value < p_thresh:
+                    name1 = sector_stocks[sector_stocks['Code'] == s1]['Name'].values[0]
+                    name2 = sector_stocks[sector_stocks['Code'] == s2]['Name'].values[0]
+                    
+                    x = sm.add_constant(series2)
+                    model = sm.OLS(series1, x).fit()
+                    
+                    if len(model.params) < 2: continue
+                    hedge_ratio = model.params.iloc[1]
+                    
+                    spread = series1 - (hedge_ratio * series2)
+                    z_score = (spread.iloc[-1] - spread.mean()) / spread.std()
+                    
+                    pairs.append({
+                        'Sector': sector, 
+                        'Stock1': name1, 'Stock2': name2,
+                        'Code1': s1, 'Code2': s2,
+                        'P_value': p_value,
+                        'Current_Z': z_score,
+                        'Spread_Series': spread
+                    })
             except: continue
-            
     return pd.DataFrame(pairs)
 
 # ==========================================
@@ -213,7 +211,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📊 Pair Scanner Terminal")
-st.markdown("Strategy: **Correlation First** (Find similar moves) ➔ **Z-Score Divergence** (Trade the spread)")
+st.markdown("Method: **Log-Price Cointegration** (Mean Reversion Strategy)")
 
 if 'all_market_data' not in st.session_state:
     st.session_state.all_market_data = None
@@ -235,7 +233,7 @@ with col_btn:
 with col_msg:
     if st.session_state.all_market_data is not None:
         raw_df = st.session_state.all_market_data
-        st.success(f"✅ Ready: {len(raw_df)} stocks across {raw_df['Sector'].nunique()} sectors")
+        st.success(f"✅ Data Ready: {len(raw_df)} stocks / {raw_df['Sector'].nunique()} sectors")
     else:
         st.info("Start by scanning the market data.")
 
@@ -278,17 +276,19 @@ if st.session_state.all_market_data is not None:
     )
     
     c1, c2, c3 = st.columns(3)
-    # 💡 [설정 변경] P-value 입력창 제거 -> Correlation 입력창 추가
-    lookback = c1.slider("Lookback (Days)", 60, 365, 120, help="짧을수록 최근 트렌드 반영 (추천: 120일)") 
-    z_thresh = c2.number_input("Z-Score Threshold", 1.5, 4.0, 2.0, 0.1)
-    corr_thresh = c3.slider("Min Correlation", 0.5, 0.99, 0.7, 0.05, help="낮을수록 더 많은 페어가 검색됩니다.")
     
-    if st.button("🚀 Run Scanner", type="primary"):
+    # 🌟 [요청 반영] Lookback Days Default = 60일
+    lookback = c1.slider("Lookback (Days)", 30, 365, 60, help="짧을수록(60일) 최근 동조화 현상을 잘 포착합니다.") 
+    z_thresh = c2.number_input("Z-Score Threshold (Signal)", 1.5, 4.0, 2.0, 0.1)
+    # 🌟 [요청 반영] P-value Filter 복구 (Default 0.05 ~ 0.1)
+    p_thresh = c3.number_input("Max P-value (Cointegration)", 0.01, 0.2, 0.1, 0.01, help="0.05: 엄격, 0.1: 보통")
+    
+    if st.button("🚀 Run Pair Analysis", type="primary"):
         if not selected_sectors:
             st.warning("Select a sector first.")
         else:
             target_stocks_info = raw_df[raw_df['Sector'].isin(selected_sectors)]
-            st.info(f"Scanning {len(target_stocks_info)} stocks... (Correlation > {corr_thresh})")
+            st.info(f"Scanning {len(target_stocks_info)} stocks... (Lookback: {lookback} days)")
             
             start_date = (datetime.now() - timedelta(days=lookback)).strftime('%Y-%m-%d')
             price_df = fetch_price_history(target_stocks_info['Code'].tolist(), start_date)
@@ -296,8 +296,8 @@ if st.session_state.all_market_data is not None:
             if price_df.empty:
                 st.error("No price data.")
             else:
-                with st.spinner("Finding correlated pairs..."):
-                    results = run_pair_analysis(price_df, target_stocks_info, corr_thresh, z_thresh)
+                with st.spinner("Calculating Cointegration (Mean Reversion)..."):
+                    results = run_pair_analysis(price_df, target_stocks_info, p_thresh, z_thresh)
                     st.session_state.analysis_results = (results, price_df)
 
 # -------------------------------------------------------------------
@@ -307,31 +307,31 @@ if st.session_state.analysis_results is not None:
     results, price_df = st.session_state.analysis_results
     
     if not results.empty:
-        # P-value 0.1 미만이면 'Safety' 마크, 아니면 주의
-        results['Stat_Safety'] = np.where(results['P_value'] < 0.1, "✅ Safe", "⚠️ Risky")
+        # Z-Score 기준으로 Signal / Watchlist 분리
+        # Watchlist의 정의: 공적분(P-val < Thresh)은 통과했으나, Z-Score가 낮아 아직 진입 시점이 아닌 것
         
         signals = results[abs(results['Current_Z']) >= z_thresh].copy()
         signals['Signal'] = np.where(signals['Current_Z'] > 0, "SHORT A / LONG B", "LONG A / SHORT B")
-        # 정렬: 상관계수 높은 순
-        signals = signals.sort_values(by='Correlation', ascending=False)
+        signals = signals.sort_values(by='P_value') # 통계적 유의성 높은 순
+        
+        watchlist = results[abs(results['Current_Z']) < z_thresh].sort_values(by='Current_Z', key=abs, ascending=False)
         
         st.divider()
-        st.subheader(f"📊 Identified Pairs: {len(results)} Total")
+        st.subheader(f"📊 Identified Pairs: {len(results)} Total (Cointegrated)")
         
-        tab1, tab2 = st.tabs(["🔥 Active Signals (Z-Score Hit)", "👀 Watchlist (Waiting)"])
+        tab1, tab2 = st.tabs(["🔥 Active Signals (Trade Now)", "👀 Watchlist (Wait for Spread)"])
         
         def draw_pair_chart(pair_data, price_df, z_limit):
             s1, s2 = pair_data['Code1'], pair_data['Code2']
             n1, n2 = pair_data['Stock1'], pair_data['Stock2']
             spread = pair_data['Spread_Series']
             
-            # 누적 수익률 비교
             p1 = (price_df[s1] / price_df[s1].iloc[0] - 1) * 100
             p2 = (price_df[s2] / price_df[s2].iloc[0] - 1) * 100
             
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
             
-            ax1.plot(p1, color='#00ffcc', label=f"{n1} ({pair_data['Correlation']:.2f})", linewidth=2) 
+            ax1.plot(p1, color='#00ffcc', label=f"{n1}", linewidth=2) 
             ax1.plot(p2, color='#ff00ff', label=f"{n2}", linewidth=2)
             ax1.set_title(f"Cumulative Returns: {n1} vs {n2}", color='#ff9900', fontsize=16)
             ax1.legend(facecolor='#1e1e1e')
@@ -342,32 +342,31 @@ if st.session_state.analysis_results is not None:
             ax2.axhline(z_limit, c='r', ls='--'); ax2.axhline(-z_limit, c='r', ls='--'); ax2.axhline(0, c='gray')
             ax2.fill_between(z_score.index, z_limit, z_score, where=(z_score>=z_limit), color='red', alpha=0.3)
             ax2.fill_between(z_score.index, -z_limit, z_score, where=(z_score<=-z_limit), color='red', alpha=0.3)
-            ax2.set_title(f"Spread Z-Score: {pair_data['Current_Z']:.2f} (P-val: {pair_data['P_value']:.3f})", color='#ff9900')
+            ax2.set_title(f"Spread Z-Score: {pair_data['Current_Z']:.2f} (P-val: {pair_data['P_value']:.4f})", color='#ff9900')
             
             st.pyplot(fig)
 
         with tab1:
             if signals.empty:
-                st.info("No signals above Z-Score threshold.")
+                st.info("No cointegrated pairs are currently deviating enough (Z-score low). Check Watchlist.")
             else:
-                # 테이블 컬럼 직관적으로 변경
                 st.dataframe(
-                    signals[['Stock1', 'Stock2', 'Correlation', 'Current_Z', 'Stat_Safety', 'Signal']], 
+                    signals[['Stock1', 'Stock2', 'Current_Z', 'Signal', 'P_value']], 
                     use_container_width=True, hide_index=True
                 )
-                sel = st.selectbox("Visualize Pair:", signals.index, format_func=lambda i: f"{signals.loc[i,'Stock1']} - {signals.loc[i,'Stock2']}", key='s1')
+                sel = st.selectbox("Visualize Signal:", signals.index, format_func=lambda i: f"{signals.loc[i,'Stock1']} - {signals.loc[i,'Stock2']}", key='s1')
                 draw_pair_chart(signals.loc[sel], price_df, z_thresh)
 
         with tab2:
-            watchlist = results[abs(results['Current_Z']) < z_thresh].sort_values('Correlation', ascending=False)
             if watchlist.empty:
-                st.info("Empty watchlist.")
+                st.info("No pairs passed the cointegration test.")
             else:
+                st.markdown("**These pairs move together (Cointegrated) but spread is currently normal.**")
                 st.dataframe(
-                    watchlist[['Stock1', 'Stock2', 'Correlation', 'Current_Z', 'Stat_Safety']], 
+                    watchlist[['Stock1', 'Stock2', 'Current_Z', 'P_value']], 
                     use_container_width=True, hide_index=True
                 )
-                sel = st.selectbox("Visualize Pair:", watchlist.index, format_func=lambda i: f"{watchlist.loc[i,'Stock1']} - {watchlist.loc[i,'Stock2']}", key='w1')
+                sel = st.selectbox("Visualize Watchlist:", watchlist.index, format_func=lambda i: f"{watchlist.loc[i,'Stock1']} - {watchlist.loc[i,'Stock2']}", key='w1')
                 draw_pair_chart(watchlist.loc[sel], price_df, z_thresh)
     else:
-        st.warning("No pairs found. Try lowering Correlation threshold (e.g. 0.6).")
+        st.warning("No cointegrated pairs found. Try increasing P-value threshold or changing the sector.")
