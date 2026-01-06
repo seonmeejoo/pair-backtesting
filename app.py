@@ -1,399 +1,251 @@
-import streamlit as st
+# 필수 라이브러리: pip install finance-datareader statsmodels matplotlib seaborn beautifulsoup4 requests
+
+import FinanceDataReader as fdr
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+import requests
+from bs4 import BeautifulSoup
+import statsmodels.api as sm
 from statsmodels.tsa.stattools import coint
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
-import yfinance as yf
-import FinanceDataReader as fdr
+import matplotlib.pyplot as plt
+from itertools import combinations
+from datetime import datetime, timedelta
 import warnings
-import re
+import time
 
-warnings.filterwarnings('ignore')
+# 한글 폰트 설정
+plt.rcParams['font.family'] = 'Malgun Gothic' 
+plt.rcParams['axes.unicode_minus'] = False
+warnings.filterwarnings("ignore")
 
-# ---------------------------------------------------------
-# 1. UI Settings
-# ---------------------------------------------------------
-st.set_page_config(page_title="Pair Trading Scanner", layout="wide", initial_sidebar_state="expanded")
-
-st.markdown("""
-<style>
-    .stApp { background-color: #1A1C24; color: #E0E0E0; font-family: 'Pretendard', sans-serif; }
-    section[data-testid="stSidebar"] { background-color: #111317; border-right: 1px solid #2B2D35; }
-    div[data-testid="metric-container"] { background-color: #252830; border: 1px solid #363945; border-radius: 4px; padding: 15px; }
-    div.stButton > button { background-color: #374151; color: white; border: 1px solid #4B5563; border-radius: 4px; font-size: 0.8rem; }
-    div.stButton > button:hover { background-color: #4B5563; }
-    h1, h2, h3 { color: #F3F4F6 !important; font-weight: 700 !important; }
-</style>
-""", unsafe_allow_html=True)
-
-DEFAULTS = { "window_size": 60, "z_threshold": 2.0, "p_cutoff": 0.05 }
-
-# ---------------------------------------------------------
-# 2. Logic Engine (Tagging & Grouping)
-# ---------------------------------------------------------
-# 수동 정의된 강력한 페어들 (자동 스캔 시에도 우선 적용)
-MANUAL_MAP = [
-    ({'SK', 'SK하이닉스'}, '👨‍👦 SK Group (Parent)'), ({'LG', 'LG전자'}, '👨‍👦 LG Group (Parent)'),
-    ({'CJ', 'CJ제일제당'}, '👨‍👦 CJ Group (Parent)'), ({'LS', 'LS ELECTRIC'}, '👨‍👦 LS Group (Parent)'),
-    ({'삼성물산', '삼성전자'}, '👨‍👦 Samsung (Gov)'), ({'한화', '한화에어로스페이스'}, '👨‍👦 Hanwha (Parent)'),
-    ({'HD현대', 'HD한국조선해양'}, '👨‍👦 HD Hyundai (Parent)'), ({'삼성전자', '삼성전자우'}, '⚡ Common-Pref'),
-    ({'현대차', '현대차2우B'}, '⚡ Common-Pref'), ({'LG화학', 'LG화학우'}, '⚡ Common-Pref'),
-    ({'SK하이닉스', '한미반도체'}, '🔗 HBM Value Chain'), ({'삼성전자', '삼성전기'}, '🔗 IT Value Chain'),
-    ({'현대차', '현대모비스'}, '🔗 Auto Value Chain'), ({'한화에어로스페이스', 'LIG넥스원'}, '⚔️ Defense Rivals'),
-    ({'NAVER', '카카오'}, '⚔️ Tech Rivals'), ({'현대차', '기아'}, '⚔️ Auto Rivals')
-]
-
-def get_pair_tag(stock_a, stock_b, sector_name=None):
-    current_set = {stock_a, stock_b}
-    # 1. 수동 맵핑 확인
-    for pair_set, tag_name in MANUAL_MAP:
-        if current_set == pair_set:
-            return tag_name
-    
-    # 2. 우선주 로직
-    if stock_a.replace('우', '').replace('B', '') == stock_b or stock_b.replace('우', '').replace('B', '') == stock_a:
-        return "⚡ Common-Pref"
-    
-    # 3. 섹터 정보 활용
-    if sector_name:
-        return f"⚔️ Rival ({sector_name})"
-    
-    return "Random"
-
-# ---------------------------------------------------------
-# 3. Data Logic (Top 500 Sector Split)
-# ---------------------------------------------------------
-@st.cache_data(ttl=86400)
-def get_market_data_info(mode):
-    """
-    모드에 따라 분석 대상 종목 리스트와 섹터 정보를 반환합니다.
-    """
-    ticker_map = {} # {code: name}
-    sector_map = {} # {name: sector}
-    
-    try:
-        if "Top 500" in mode:
-            # KRX 전체 로딩 및 필터링
-            df_krx = fdr.StockListing('KRX')
-            df_krx = df_krx[~df_krx['Name'].str.contains('스팩|제[0-9]+호|리츠|TIGER|KODEX|ETN')]
-            df_krx = df_krx.dropna(subset=['Sector', 'Marcap'])
-            
-            # Top 500 추출
-            top500 = df_krx.sort_values('Marcap', ascending=False).head(500)
-            
-            for _, row in top500.iterrows():
-                suffix = ".KS" if row['Market'] == 'KOSPI' else ".KQ"
-                full_code = row['Code'] + suffix
-                ticker_map[full_code] = row['Name']
-                sector_map[row['Name']] = row['Sector']
-                
-        else: # Manual Core List
-            manual_dict = {
-                '005930.KS': '삼성전자', '000660.KS': 'SK하이닉스', '005380.KS': '현대차', '000270.KS': '기아',
-                '005490.KS': 'POSCO홀딩스', '006400.KS': '삼성SDI', '051910.KS': 'LG화학', '035420.KS': 'NAVER',
-                '035720.KS': '카카오', '105560.KS': 'KB금융', '055550.KS': '신한지주', '034020.KS': 'SK',
-                '003550.KS': 'LG', '066570.KS': 'LG전자', '000810.KS': '삼성화재', '032830.KS': '삼성생명',
-                '028260.KS': '삼성물산', '000880.KS': '한화', '267260.KS': 'HD현대', '001040.KS': 'CJ',
-                '042700.KS': '한미반도체', '009150.KS': '삼성전기', '011070.KS': 'LG이노텍', '012330.KS': '현대모비스',
-                '012450.KS': '한화에어로스페이스', '079550.KS': 'LIG넥스원', '003670.KS': 'POSCO퓨처엠',
-                '005935.KS': '삼성전자우', '005387.KS': '현대차2우B', '051915.KS': 'LG화학우'
-            }
-            ticker_map = manual_dict
-            # Manual 모드는 섹터 정보가 없으므로 'Core'라는 가상의 단일 섹터로 취급하거나
-            # 굳이 섹터 스플릿을 안하고 전체 스캔을 돌림. 여기서는 편의상 None 처리.
-            sector_map = None 
-
-        return ticker_map, sector_map
-
-    except Exception as e:
-        st.error(f"Market Data Error: {e}")
-        return {}, {}
-
-@st.cache_data(ttl=3600)
-def fetch_price_data(ticker_map, start_date, end_date):
-    tickers = list(ticker_map.keys())
-    if '^KS11' not in tickers: tickers.append('^KS11')
-    
-    # yfinance 다운로드
-    try:
-        # 데이터가 너무 많으면 안내 메시지
-        if len(tickers) > 100:
-            st.toast(f"Downloading {len(tickers)} stocks...", icon="⏳")
-            
-        data = yf.download(tickers, start=start_date, end=end_date, progress=False)['Close']
-        data = data.dropna(axis=1, how='all') # 데이터 없는 컬럼 삭제
+class NaverPairScanner:
+    def __init__(self, start_date=None, lookback_days=365):
+        self.lookback_days = lookback_days
+        self.start_date = start_date if start_date else (datetime.now() - timedelta(days=lookback_days)).strftime('%Y-%m-%d')
+        self.stock_list = None
+        self.price_data = {}
         
-        # 지수 분리
-        if '^KS11' in data.columns:
-            kospi = data['^KS11'].rename('KOSPI')
-            stocks = data.drop(columns=['^KS11'])
-        else:
-            kospi = pd.Series()
-            stocks = data
+        # 파라미터
+        self.p_value_threshold = 0.05
+        self.z_score_threshold = 2.0
+
+    def get_naver_sectors(self, limit_sectors=10):
+        """
+        네이버 금융 '업종별 시세'에서 섹터와 구성 종목을 크롤링합니다.
+        limit_sectors: 테스트 속도를 위해 상위 N개 업종만 긁어옵니다 (None이면 전체)
+        """
+        print("📡 네이버 증권에서 섹터 정보를 긁어오는 중... (조금 걸려요!)")
+        
+        base_url = "https://finance.naver.com/sise/sise_group.naver?type=upjong"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        
+        res = requests.get(base_url, headers=headers)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # 1. 업종 목록 가져오기
+        table = soup.find('table', {'class': 'type_1'})
+        rows = table.find_all('tr')
+        
+        sector_links = []
+        for row in rows:
+            cols = row.find_all('td')
+            if len(cols) < 2: continue
             
-        # 한글명 변환
-        stocks = stocks.rename(columns=ticker_map)
-        stocks = stocks.ffill().bfill()
+            link_tag = cols[0].find('a')
+            if link_tag:
+                sector_name = link_tag.text.strip()
+                link_url = "https://finance.naver.com" + link_tag['href']
+                sector_links.append((sector_name, link_url))
         
-        return stocks, kospi
-    except Exception as e:
-        st.error(f"Price Download Error: {e}")
-        return pd.DataFrame(), pd.Series()
+        # 제한 설정 (속도 위해)
+        if limit_sectors:
+            print(f"ℹ️ 속도를 위해 상위 {limit_sectors}개 업종만 조회합니다.")
+            sector_links = sector_links[:limit_sectors]
 
-# ---------------------------------------------------------
-# 4. Analysis Engine
-# ---------------------------------------------------------
-def run_analysis(df_prices, window, threshold, p_val, start, end, sector_map):
-    pairs = []
-    target_mask = (df_prices.index >= pd.to_datetime(start)) & (df_prices.index <= pd.to_datetime(end))
-    cols = df_prices.columns
-    
-    prog_bar = st.progress(0, text="Initializing Analysis...")
-    
-    # Grouping Strategy
-    groups = {}
-    if sector_map:
-        # Sector Split Mode: 섹터별로 묶음
-        for stock in cols:
-            sec = sector_map.get(stock, 'Unknown')
-            if sec not in groups: groups[sec] = []
-            groups[sec].append(stock)
-    else:
-        # Manual Mode: 전체를 하나의 그룹으로 (All-to-All)
-        groups['Core'] = list(cols)
-    
-    total_groups = len(groups)
-    processed = 0
-    
-    for group_name, stocks in groups.items():
-        processed += 1
-        n = len(stocks)
-        if n < 2: continue
+        # 2. 각 업종별 구성 종목 크롤링
+        all_stocks = []
         
-        prog_bar.progress(processed / total_groups, text=f"Scanning [{group_name}] ({n} stocks)")
-        
-        for i in range(n):
-            for j in range(i + 1, n):
-                sa, sb = stocks[i], stocks[j]
-                
-                # Correlation Filter (Fast)
-                if df_prices[sa].corr(df_prices[sb]) < 0.6: continue
-                
-                try:
-                    # Cointegration Test (Slow)
-                    score, pval, _ = coint(df_prices[sa], df_prices[sb])
-                    if pval < p_val:
-                        # Signal Generation
-                        log_a, log_b = np.log(df_prices[sa]), np.log(df_prices[sb])
-                        spread = log_a - log_b
-                        mean = spread.rolling(window).mean()
-                        std = spread.rolling(window).std()
-                        z_all = (spread - mean) / std
-                        z_target = z_all.loc[target_mask]
-                        
-                        if z_target.empty: continue
-                        
-                        positions = np.zeros(len(z_target)); curr_pos = 0
-                        for k in range(len(z_target)):
-                            z = z_target.iloc[k]
-                            if curr_pos == 0:
-                                if z < -threshold: curr_pos = 1 
-                                elif z > threshold: curr_pos = -1
-                            elif curr_pos == 1:
-                                if z >= 0 or z < -4.0: curr_pos = 0
-                            elif curr_pos == -1:
-                                if z <= 0 or z > 4.0: curr_pos = 0
-                            positions[k] = curr_pos
-                        
-                        ret_a = df_prices[sa].loc[target_mask].pct_change().fillna(0)
-                        ret_b = df_prices[sb].loc[target_mask].pct_change().fillna(0)
-                        spr_ret = (ret_a - ret_b) * pd.Series(positions, index=z_target.index).shift(1).fillna(0).values
-                        
-                        # Tag Generation
-                        tag = get_pair_tag(sa, sb, group_name if sector_map else None)
-                        
-                        pairs.append({
-                            'Stock A': sa, 'Stock B': sb, 'Tag': tag,
-                            'Z-Score': z_all.iloc[-1], 'Corr': df_prices[sa].corr(df_prices[sb]), 'P-value': pval,
-                            'Final_Ret': (1 + spr_ret).prod() - 1,
-                            'Daily_Ret_Series': pd.Series(spr_ret, index=z_target.index),
-                            'Spread': spread, 'Mean': mean, 'Std': std, 'Analysis_Dates': z_target.index,
-                            'Price A': df_prices[sa].iloc[-1], 'Price B': df_prices[sb].iloc[-1]
-                        })
-                except: pass
-                
-    prog_bar.empty()
-    return pd.DataFrame(pairs)
-
-# ---------------------------------------------------------
-# 5. Visualization Functions
-# ---------------------------------------------------------
-def plot_pair_analysis(row, df_prices, threshold):
-    sa, sb = row['Stock A'], row['Stock B']
-    dates = row['Analysis_Dates']
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.5, 0.25, 0.25])
-    
-    pa, pb = df_prices[sa].loc[dates], df_prices[sb].loc[dates]
-    # Rebase to 100
-    fig.add_trace(go.Scatter(x=dates, y=(pa/pa.iloc[0])*100, name=sa, line=dict(color='#3B82F6', width=1.5)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=dates, y=(pb/pb.iloc[0])*100, name=sb, line=dict(color='#F59E0B', width=1.5)), row=1, col=1)
-    
-    z_vals = ((row['Spread'] - row['Mean']) / row['Std']).loc[dates]
-    fig.add_trace(go.Scatter(x=dates, y=z_vals, name='Z-Score', line=dict(color='#9CA3AF', width=1)), row=2, col=1)
-    
-    # Signal Markers
-    sell_sig = z_vals[z_vals > threshold]; buy_sig = z_vals[z_vals < -threshold]
-    fig.add_trace(go.Scatter(x=sell_sig.index, y=sell_sig, mode='markers', marker=dict(color='#EF4444', size=5), name='Sell', showlegend=False), row=2, col=1)
-    fig.add_trace(go.Scatter(x=buy_sig.index, y=buy_sig, mode='markers', marker=dict(color='#3B82F6', size=5), name='Buy', showlegend=False), row=2, col=1)
-    
-    fig.add_hline(y=threshold, line_dash="dash", line_color="#EF4444", row=2, col=1)
-    fig.add_hline(y=-threshold, line_dash="dash", line_color="#3B82F6", row=2, col=1)
-    fig.add_hrect(y0=-threshold, y1=threshold, fillcolor="gray", opacity=0.1, line_width=0, row=2, col=1)
-    
-    cum = (1 + row['Daily_Ret_Series']).cumprod() * 100 - 100
-    fig.add_trace(go.Scatter(x=dates, y=cum, name='Return %', line=dict(color='#10B981', width=1.5), fill='tozeroy'), row=3, col=1)
-    
-    fig.update_layout(title=f"<b>[{row['Tag']}] {sa} vs {sb}</b>", height=600, template="plotly_dark", plot_bgcolor='#1A1C24', paper_bgcolor='#1A1C24', margin=dict(t=50, b=10))
-    return fig
-
-def plot_scatter(results):
-    if results.empty: return None
-    fig = px.scatter(
-        results, x='Corr', y=results['Z-Score'].abs(), color='Tag',
-        hover_data=['Stock A', 'Stock B'],
-        title='Opportunity Map', labels={'Corr': 'Correlation', 'y': 'Abs Z-Score'},
-        template='plotly_dark'
-    )
-    fig.add_shape(type="rect", x0=0.8, y0=2.0, x1=1.0, y1=results['Z-Score'].abs().max() + 0.5,
-        line=dict(color="#10B981", width=1, dash="dot"), fillcolor="#10B981", opacity=0.1)
-    fig.update_layout(height=400, plot_bgcolor='#1A1C24', paper_bgcolor='#1A1C24')
-    return fig
-
-# ---------------------------------------------------------
-# 6. Sidebar & Main Execution
-# ---------------------------------------------------------
-with st.sidebar:
-    st.header("Settings")
-    universe_mode = st.selectbox("Target Universe", ["Top 500 (Sector Split)", "Manual Core List"])
-    app_mode = st.radio("Mode", ["Live Analysis", "Backtest"])
-    st.divider()
-    total_capital = st.number_input("Capital (KRW)", value=10000000, step=1000000, format="%d")
-    
-    with st.expander("Parameters", expanded=True):
-        for key in DEFAULTS:
-            if key not in st.session_state: st.session_state[key] = DEFAULTS[key]
-        window_size = st.slider("Window Size", 20, 120, key="window_size")
-        z_threshold = st.slider("Z-Score Threshold", 1.0, 4.0, key="z_threshold")
-        p_cutoff = st.slider("Max P-value", 0.01, 0.20, key="p_cutoff")
-        
-        st.write("") 
-        if st.button("Reset Parameters"):
-            for key, value in DEFAULTS.items(): st.session_state[key] = value
-            st.rerun()
-
-    st.divider()
-    if app_mode == "Backtest":
-        c1, c2 = st.columns(2)
-        start_input = c1.date_input("Start", datetime(2025, 1, 1))
-        end_input = c2.date_input("End", datetime(2025, 12, 31))
-        run_label = "Run Backtest"
-    else:
-        end_input = datetime.now(); start_input = end_input - timedelta(days=365)
-        run_label = "Run Analysis"
-
-    run_btn = st.button(run_label, type="primary", use_container_width=True)
-
-if run_btn:
-    # 1. 정보 획득 (티커, 섹터 맵)
-    with st.spinner("Initializing Market Universe..."):
-        ticker_map, sector_map = get_market_data_info(universe_mode)
-    
-    if not ticker_map:
-        st.error("Failed to load ticker info.")
-    else:
-        # 2. 가격 데이터 다운로드
-        fetch_start_str = start_input.strftime('%Y-%m-%d')
-        fetch_end_str = end_input.strftime('%Y-%m-%d')
-        
-        stocks, kospi = fetch_price_data(ticker_map, fetch_start_str, fetch_end_str)
-        
-        if stocks.empty:
-            st.error("Failed to download price data.")
-        else:
-            # 3. 분석 실행
-            results = run_analysis(stocks, window_size, z_threshold, p_cutoff, start_input, end_input, sector_map)
+        for idx, (sec_name, sec_url) in enumerate(sector_links):
+            print(f"   [{idx+1}/{len(sector_links)}] {sec_name} 읽는 중...")
             
-            def fmt(name):
-                code_list = [k for k, v in ticker_map.items() if v == name]
-                code = code_list[0].split('.')[0] if code_list else "Unknown"
-                return f"{name} ({code})"
+            res_sec = requests.get(sec_url, headers=headers)
+            soup_sec = BeautifulSoup(res_sec.text, 'html.parser')
             
-            if results.empty:
-                st.warning("No pairs found. Try relaxing P-value or Z-Score.")
+            # 종목 테이블 찾기
+            sub_table = soup_sec.find('table', {'class': 'type_5'})
+            if not sub_table: continue
             
-            elif app_mode == "Backtest":
-                # Benchmark (KOSPI)
-                if not kospi.empty:
-                    k_period = kospi.loc[start_input:end_input]; k_ret = (k_period / k_period.iloc[0]) - 1
-                else: k_ret = pd.Series(0, index=pd.date_range(start_input, end_input))
+            sub_rows = sub_table.find_all('tr')
+            for s_row in sub_rows:
+                s_cols = s_row.find_all('td')
+                if len(s_cols) < 2: continue
+                
+                # 종목명/코드 찾기
+                name_tag = s_cols[0].find('a')
+                if name_tag:
+                    stock_name = name_tag.text.strip()
+                    # href에서 code 추출: /item/main.naver?code=005930
+                    stock_code = name_tag['href'].split('code=')[-1]
+                    
+                    all_stocks.append({
+                        'Sector': sec_name,
+                        'Name': stock_name,
+                        'Code': stock_code
+                    })
+            
+            # 네이버 차단 방지용 딜레이
+            time.sleep(0.2)
+            
+        self.stock_list = pd.DataFrame(all_stocks)
+        # 중복 제거 (ETF 등이 섞일 수 있음)
+        self.stock_list = self.stock_list.drop_duplicates(subset=['Code'])
+        
+        print(f"✅ 크롤링 완료! {len(self.stock_list['Sector'].unique())}개 섹터, {len(self.stock_list)}개 종목 확보.")
+        return self.stock_list
 
-                # Strategy Portfolio
-                all_ret = pd.DataFrame(index=k_ret.index)
-                for _, row in results.iterrows(): 
-                    s = row['Daily_Ret_Series']
-                    s.index = pd.to_datetime(s.index)
-                    all_ret[f"{row['Stock A']}-{row['Stock B']}"] = s.reindex(all_ret.index).fillna(0)
-                
-                p_daily = all_ret.mean(axis=1); p_cum = (1 + p_daily).cumprod() - 1
-                
-                # Metrics
-                st.subheader("Performance Report (vs KOSPI)")
-                c1, c2, c3 = st.columns(3)
-                s_final = p_cum.iloc[-1]*100 if not p_cum.empty else 0
-                k_final = k_ret.iloc[-1]*100 if not k_ret.empty else 0
-                c1.metric("Strategy Return", f"{s_final:.2f}%", f"{s_final-k_final:.2f}% vs Market")
-                c2.metric("Benchmark Return", f"{k_final:.2f}%"); c3.metric("Alpha", f"{s_final-k_final:.2f}%p")
-                
-                # Comparison Chart
-                fig_comp = go.Figure()
-                fig_comp.add_trace(go.Scatter(x=p_cum.index, y=p_cum*100, name='Strategy', line=dict(color='#10B981', width=3)))
-                fig_comp.add_trace(go.Scatter(x=k_ret.index, y=k_ret*100, name='Benchmark', line=dict(color='#9CA3AF', width=2, dash='dot')))
-                fig_comp.update_layout(title="Cumulative Return Comparison", template="plotly_dark", height=400, plot_bgcolor='#1A1C24', paper_bgcolor='#1A1C24')
-                st.plotly_chart(fig_comp, use_container_width=True)
-                
-                st.plotly_chart(plot_scatter(results), use_container_width=True)
+    def fetch_price_and_filter(self, top_n_per_sector=5):
+        """
+        크롤링한 종목들의 주가를 받고, 시가총액(또는 임의) 상위 N개만 남겨서 데이터프레임 생성
+        (네이버 업종페이지 순서는 보통 등락률 순이므로, 여기서는 단순히 앞순서 N개를 자릅니다)
+        """
+        print("📉 주가 데이터 다운로드 중...")
+        
+        # 섹터별로 상위 N개만 추림 (너무 많으면 계산 오래 걸림)
+        target_df = self.stock_list.groupby('Sector').head(top_n_per_sector)
+        codes = target_df['Code'].tolist()
+        
+        data_dict = {}
+        count = 0
+        
+        for code in codes:
+            try:
+                df = fdr.DataReader(code, self.start_date)
+                if not df.empty:
+                    data_dict[code] = df['Close']
+            except:
+                continue
+            count += 1
+            if count % 20 == 0:
+                print(f"   ... {count}/{len(codes)} 종목 완료")
 
-                st.divider()
-                col_t, col_w = st.columns(2)
-                with col_t:
-                    st.subheader("Top Performers")
-                    for _, row in results.sort_values('Final_Ret', ascending=False).head(5).iterrows():
-                        with st.expander(f"{row['Tag']} | {fmt(row['Stock A'])} / {fmt(row['Stock B'])} ({row['Final_Ret']*100:.1f}%)"):
-                            st.plotly_chart(plot_pair_analysis(row, stocks, z_threshold), use_container_width=True)
-                with col_w:
-                    st.subheader("Worst Performers")
-                    for _, row in results.sort_values('Final_Ret', ascending=True).head(5).iterrows():
-                        with st.expander(f"{row['Tag']} | {fmt(row['Stock A'])} / {fmt(row['Stock B'])} ({row['Final_Ret']*100:.1f}%)"):
-                            st.plotly_chart(plot_pair_analysis(row, stocks, z_threshold), use_container_width=True)
-            else:
-                # Live Mode
-                st.subheader("Live Trading Signals")
-                actives = results[results['Z-Score'].abs() >= z_threshold]
-                col1, col2 = st.columns([3, 1]); col1.markdown(f"**{len(results)}** pairs monitored."); col2.metric("Active Signals", f"{len(actives)}")
+        self.price_df = pd.DataFrame(data_dict).dropna()
+        
+        # 데이터가 받아진 종목만 남기기
+        self.valid_stocks = target_df[target_df['Code'].isin(self.price_df.columns)]
+        print(f"✅ 데이터 확보 완료: {len(self.price_df.columns)}개 종목")
+
+    def find_pairs(self):
+        pairs = []
+        sectors = self.valid_stocks['Sector'].unique()
+        
+        print("🔍 섹터 내 페어 분석 중...")
+        
+        for sector in sectors:
+            # 해당 섹터이면서 데이터가 있는 종목들
+            sector_codes = self.valid_stocks[self.valid_stocks['Sector'] == sector]['Code'].tolist()
+            
+            if len(sector_codes) < 2:
+                continue
+            
+            for s1, s2 in combinations(sector_codes, 2):
+                series1 = self.price_df[s1]
+                series2 = self.price_df[s2]
                 
-                tab1, tab2 = st.tabs(["Action Required", "Watchlist"])
-                with tab1:
-                    if not actives.empty:
-                        for _, row in actives.sort_values(by='Z-Score', key=abs, ascending=False).iterrows():
-                            with st.expander(f"🎯 [{row['Tag']}] {fmt(row['Stock A'])} / {fmt(row['Stock B'])} (Z: {row['Z-Score']:.2f})", expanded=True):
-                                st.plotly_chart(plot_pair_analysis(row, stocks, z_threshold), use_container_width=True)
-                    else: st.info("No signals matching current threshold.")
-                with tab2:
-                    st.plotly_chart(plot_scatter(results), use_container_width=True)
-                    df_v = results[['Tag', 'Stock A', 'Stock B', 'Z-Score', 'Corr', 'Price A', 'Price B']].copy()
-                    df_v['Stock A'] = df_v['Stock A'].apply(fmt); df_v['Stock B'] = df_v['Stock B'].apply(fmt)
-                    st.dataframe(df_v.sort_values('Z-Score', key=abs, ascending=False), use_container_width=True)
-else: st.info("Configure settings and click Run.")
+                # 1차 필터: 상관계수 (계산 속도 높이기 위함)
+                if series1.corr(series2) < 0.8:
+                    continue
+
+                # 공적분 테스트
+                score, p_value, _ = coint(series1, series2)
+                
+                if p_value < self.p_value_threshold:
+                    name1 = self.valid_stocks[self.valid_stocks['Code'] == s1]['Name'].values[0]
+                    name2 = self.valid_stocks[self.valid_stocks['Code'] == s2]['Name'].values[0]
+                    
+                    # 헷지 비율 및 스프레드
+                    x = sm.add_constant(series2)
+                    model = sm.OLS(series1, x).fit()
+                    hedge_ratio = model.params[1]
+                    
+                    spread = series1 - (hedge_ratio * series2)
+                    z_score = (spread.iloc[-1] - spread.mean()) / spread.std()
+                    
+                    pairs.append({
+                        'Sector': sector,
+                        'Stock1': name1,
+                        'Stock2': name2,
+                        'P_value': round(p_value, 5),
+                        'Current_Z': round(z_score, 2),
+                        'Code1': s1,
+                        'Code2': s2,
+                        'Spread_Series': spread
+                    })
+        
+        self.results = pd.DataFrame(pairs)
+        return self.results
+
+    def get_signals(self):
+        if self.results.empty:
+            return pd.DataFrame(), pd.DataFrame()
+            
+        # Z-score 절대값이 기준보다 크면 진입 시그널
+        signals = self.results[abs(self.results['Current_Z']) >= self.z_score_threshold].copy()
+        signals['Action'] = np.where(signals['Current_Z'] > 0, 
+                                     f"Short {signals['Stock1']} / Long {signals['Stock2']}", 
+                                     f"Long {signals['Stock1']} / Short {signals['Stock2']}")
+        
+        watchlist = self.results[abs(self.results['Current_Z']) < self.z_score_threshold].sort_values('P_value')
+        return signals, watchlist
+
+    def plot_pair(self, pair_info):
+        s1, s2 = pair_info['Code1'], pair_info['Code2']
+        name1, name2 = pair_info['Stock1'], pair_info['Stock2']
+        spread = pair_info['Spread_Series']
+        
+        p1 = self.price_df[s1] / self.price_df[s1].iloc[0] * 100
+        p2 = self.price_df[s2] / self.price_df[s2].iloc[0] * 100
+        z_score_series = (spread - spread.mean()) / spread.std()
+        
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6))
+        
+        ax1.plot(p1, label=name1, color='tab:blue')
+        ax1.plot(p2, label=name2, color='tab:orange')
+        ax1.set_title(f"Price: {name1} vs {name2} [{pair_info['Sector']}]")
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        ax2.plot(z_score_series, label='Z-Score', color='green')
+        ax2.axhline(2, color='r', linestyle='--'); ax2.axhline(-2, color='r', linestyle='--')
+        ax2.axhline(0, color='k', alpha=0.5)
+        ax2.set_title(f"Spread Z (Current: {pair_info['Current_Z']})")
+        
+        plt.tight_layout()
+        plt.show()
+
+# ==========================================
+# 🚀 실행 (RUN ME)
+# ==========================================
+# 1. 스캐너 생성
+scanner = NaverPairScanner(lookback_days=365)
+
+# 2. 네이버에서 섹터 정보 긁어오기
+# (limit_sectors=5 : 속도 위해 상위 5개 업종만 함. 전체 다 하려면 None 입력)
+scanner.get_naver_sectors(limit_sectors=10) 
+
+# 3. 주가 받고 분석 (섹터당 5개 종목씩만)
+scanner.fetch_price_and_filter(top_n_per_sector=5)
+scanner.find_pairs()
+signals, watchlist = scanner.get_signals()
+
+print("\n" + "="*50)
+if not signals.empty:
+    print(f"🔥 진입 추천 페어 ({len(signals)}개):")
+    print(signals[['Sector', 'Stock1', 'Stock2', 'Current_Z']].to_string(index=False))
+    print("\n📊 첫번째 추천 페어 차트:")
+    scanner.plot_pair(signals.iloc[0])
+else:
+    print("🤷 진입 시그널 없음.")
+
+if not watchlist.empty:
+    print(f"\n👀 관심 종목 (Spread 대기중):")
+    print(watchlist[['Sector', 'Stock1', 'Stock2', 'Current_Z']].head().to_string(index=False))
