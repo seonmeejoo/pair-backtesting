@@ -153,11 +153,15 @@ def run_pair_analysis(price_df, stocks_info, p_thresh, z_thresh):
         if len(valid_codes) < 2: continue
         
         for s1, s2 in combinations(valid_codes, 2):
-            series1 = price_df[s1]
-            series2 = price_df[s2]
+            # [핵심 변경 1] 가격 자체(Price) 대신 로그 가격(Log Price) 사용
+            # 이유: 10만원짜리와 1만원짜리 주식의 등락폭 왜곡을 없앰
+            series1 = np.log(price_df[s1])
+            series2 = np.log(price_df[s2])
             
             if len(series1) < 30 or series1.std() == 0 or series2.std() == 0: continue
-            if series1.corr(series2) < 0.8: continue
+            
+            # [핵심 변경 2] 상관계수 기준 완화 (0.8 -> 0.7)
+            if series1.corr(series2) < 0.7: continue
 
             try:
                 score, p_value, _ = coint(series1, series2)
@@ -171,6 +175,7 @@ def run_pair_analysis(price_df, stocks_info, p_thresh, z_thresh):
                     if len(model.params) < 2: continue
                     hedge_ratio = model.params.iloc[1]
                     
+                    # Spread = Log(A) - beta * Log(B)
                     spread = series1 - (hedge_ratio * series2)
                     z_score = (spread.iloc[-1] - spread.mean()) / spread.std()
                     
@@ -179,11 +184,11 @@ def run_pair_analysis(price_df, stocks_info, p_thresh, z_thresh):
                         'Stock1': name1, 'Stock2': name2,
                         'Code1': s1, 'Code2': s2,
                         'P_value': p_value, 'Current_Z': z_score,
-                        'Spread_Series': spread
+                        'Spread_Series': spread 
                     })
             except: continue
     return pd.DataFrame(pairs)
-
+    
 # ==========================================
 # 🖥️ UI: Pair Scanner Terminal
 # ==========================================
@@ -325,25 +330,28 @@ if st.session_state.analysis_results is not None:
             n1, n2 = pair_data['Stock1'], pair_data['Stock2']
             spread = pair_data['Spread_Series']
             
-            p1 = price_df[s1] / price_df[s1].iloc[0] * 100
-            p2 = price_df[s2] / price_df[s2].iloc[0] * 100
+            # 시각화는 직관적인 '누적 수익률(%)'로 변환해서 보여줌
+            p1 = (price_df[s1] / price_df[s1].iloc[0] - 1) * 100
+            p2 = (price_df[s2] / price_df[s2].iloc[0] - 1) * 100
             
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
             
-            ax1.plot(p1, color='#00ffcc', label=n1, linewidth=2) 
-            ax1.plot(p2, color='#ff00ff', label=n2, linewidth=2)
-            ax1.set_title(f"PRICE ACTION: {n1} vs {n2}", color='#ff9900', fontsize=16, pad=15)
+            # Neon Style
+            ax1.plot(p1, color='#00ffcc', label=f"{n1} (Returns %)", linewidth=2) 
+            ax1.plot(p2, color='#ff00ff', label=f"{n2} (Returns %)", linewidth=2)
+            ax1.set_title(f"CUMULATIVE RETURNS: {n1} vs {n2}", color='#ff9900', fontsize=16, pad=15)
             ax1.legend(facecolor='#1e1e1e', edgecolor='#444444')
+            ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
             
             z_score = (spread - spread.mean()) / spread.std()
-            ax2.plot(z_score, color='#ffff00', label='Z-Score', linewidth=1.5)
+            ax2.plot(z_score, color='#ffff00', label='Spread Z-Score', linewidth=1.5)
             ax2.axhline(z_limit, color='red', linestyle='--', linewidth=1)
             ax2.axhline(-z_limit, color='red', linestyle='--', linewidth=1)
             ax2.axhline(0, color='gray', linestyle='-', alpha=0.5)
             
             ax2.fill_between(z_score.index, z_limit, z_score, where=(z_score >= z_limit), color='red', alpha=0.3)
             ax2.fill_between(z_score.index, -z_limit, z_score, where=(z_score <= -z_limit), color='red', alpha=0.3)
-            ax2.set_title(f"SPREAD Z-SCORE (Current: {pair_data['Current_Z']:.2f})", color='#ff9900', fontsize=12)
+            ax2.set_title(f"LOG-SPREAD Z-SCORE (Current: {pair_data['Current_Z']:.2f})", color='#ff9900', fontsize=12)
             
             plt.tight_layout()
             st.pyplot(fig)
