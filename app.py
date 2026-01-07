@@ -225,23 +225,35 @@ if st.session_state.price_df is not None:
         
         def draw_chart(pair):
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
-            # 주가 차트 (누적 수익률)
+            
+            # 1. 주가 차트 (누적 수익률)
             p1 = (st.session_state.price_df[pair['Code1']] / st.session_state.price_df[pair['Code1']].iloc[0] - 1) * 100
             p2 = (st.session_state.price_df[pair['Code2']] / st.session_state.price_df[pair['Code2']].iloc[0] - 1) * 100
+            
             ax1.plot(p1, color='#00ffcc', label=pair['Stock1'])
             ax1.plot(p2, color='#ff00ff', label=pair['Stock2'])
             ax1.set_title(f"Cumulative Returns: {pair['Stock1']} vs {pair['Stock2']}")
-            ax1.legend()
+            ax1.legend(facecolor='#1e1e1e', edgecolor='#444444')
+            ax1.grid(True, alpha=0.3)
             
-            # Z-Score 차트
+            # 2. Z-Score 차트 (변수명 수정 완료)
+            # 계산된 변수명 z_series를 아래 plot 함수에서 동일하게 사용합니다.
             z_series = (pair['Spread'] - pair['Spread'].mean()) / pair['Spread'].std()
-            ax2.plot(z_score, color='#ffff00', label='Spread Z-Score')
+            
+            ax2.plot(z_series, color='#ffff00', label='Spread Z-Score')
             ax2.axhline(z_thresh, color='red', linestyle='--')
             ax2.axhline(-z_thresh, color='red', linestyle='--')
             ax2.axhline(0, color='gray', alpha=0.5)
-            ax2.fill_between(z_series.index, z_thresh, z_series, where=(z_series>=z_thresh), color='red', alpha=0.3)
-            ax2.fill_between(z_series.index, -z_thresh, z_series, where=(z_series<=-z_thresh), color='red', alpha=0.3)
+            
+            # 진입 구간 색상 채우기
+            ax2.fill_between(z_series.index, z_thresh, z_series, where=(z_series >= z_thresh), color='red', alpha=0.3)
+            ax2.fill_between(z_series.index, -z_thresh, z_series, where=(z_series <= -z_thresh), color='red', alpha=0.3)
+            
             ax2.set_title(f"Z-Score Spread (Current: {pair['Current_Z']:.2f})")
+            ax2.legend(facecolor='#1e1e1e', edgecolor='#444444')
+            ax2.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
             st.pyplot(fig)
 
         with tab1:
