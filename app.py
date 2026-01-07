@@ -22,19 +22,36 @@ BLOOMBERG_THEME = {
 }
 
 # --- 함수 정의 ---
-
 @st.cache_data
 def get_stock_list():
-    """KRX 전체 종목을 가져와서 섹터별로 정리합니다."""
-    df = fdr.StockListing('KRX')
+    """KRX 전체 종목을 가져옵니다. (KRX 서버 차단 시 KOSPI/KOSDAQ 분리 호출로 우회)"""
+    try:
+        # 1차 시도: KRX 전체 조회 (가장 깔끔함)
+        df = fdr.StockListing('KRX')
+    except Exception:
+        # 2차 시도: 실패 시 KOSPI, KOSDAQ 각각 조회 후 병합 (네이버 금융 소스 활용)
+        df_kospi = fdr.StockListing('KOSPI')
+        df_kosdaq = fdr.StockListing('KOSDAQ')
+        df = pd.concat([df_kospi, df_kosdaq])
     
+    # 컬럼 이름 통일 (Symbol -> Code 등 라이브러리 버전에 따른 차이 보정)
+    if 'Symbol' in df.columns and 'Code' not in df.columns:
+        df = df.rename(columns={'Symbol': 'Code'})
+        
     # 필요한 컬럼만 선택 및 정리
-    df = df[['Code', 'Name', 'Sector', 'Marcap', 'Close', 'ChgesRatio']]
+    # 'Sector'가 없는 경우도 대비하여 에러 방지
+    required_cols = ['Code', 'Name', 'Sector', 'Marcap', 'Close', 'ChgesRatio']
+    
+    # 데이터프레임에 없는 컬럼은 NaN으로 처리하여 오류 방지
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = np.nan
+
+    df = df[required_cols]
     df = df.dropna(subset=['Sector']) # 섹터 없는 것 제거
-    df = df[~df['Sector'].str.contains('기타', na=False)] # "기타" 섹터 제외 (요청사항)
+    df = df[~df['Sector'].str.contains('기타', na=False)] # "기타" 섹터 제외
     
     return df
-
 def get_top_stocks_per_sector(df, top_n=30):
     """각 섹터별 시가총액 상위 N개만 필터링합니다."""
     return df.sort_values(['Sector', 'Marcap'], ascending=[True, False]).groupby('Sector').head(top_n)
