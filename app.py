@@ -25,28 +25,41 @@ BLOOMBERG_THEME = {
 
 @st.cache_data
 def get_stock_list():
-    """KRX 전체 종목 조회 (서버 차단 시 KOSPI/KOSDAQ 우회)"""
+    """KRX 전체 종목 조회 (데이터 타입 오류 방지 강화)"""
     try:
         df = fdr.StockListing('KRX')
     except Exception:
-        # KRX 조회 실패 시 우회
-        df_kospi = fdr.StockListing('KOSPI')
-        df_kosdaq = fdr.StockListing('KOSDAQ')
-        df = pd.concat([df_kospi, df_kosdaq])
+        # KRX 조회 실패 시 KOSPI/KOSDAQ 각각 조회 후 병합
+        try:
+            df_kospi = fdr.StockListing('KOSPI')
+            df_kosdaq = fdr.StockListing('KOSDAQ')
+            df = pd.concat([df_kospi, df_kosdaq])
+        except Exception:
+             # 최악의 경우 빈 데이터프레임 반환 (앱이 죽는 것 방지)
+            return pd.DataFrame(columns=['Code', 'Name', 'Sector', 'Marcap', 'Close', 'ChgesRatio'])
     
-    if 'Symbol' in df.columns and 'Code' not in df.columns:
+    # 1. 컬럼명 통일 (Symbol -> Code)
+    if 'Symbol' in df.columns:
         df = df.rename(columns={'Symbol': 'Code'})
         
+    # 2. 필수 컬럼 존재 여부 확인 및 생성
     required_cols = ['Code', 'Name', 'Sector', 'Marcap', 'Close', 'ChgesRatio']
     for col in required_cols:
         if col not in df.columns:
             df[col] = np.nan
 
-    df = df[required_cols]
-    df = df.dropna(subset=['Sector'])
+    # 3. 데이터 타입 강제 변환 (이 부분이 핵심 해결책)
+    # Sector 컬럼의 결측치(NaN)를 'Unknown'으로 채우고, 강제로 문자열(str)로 변환합니다.
+    df['Sector'] = df['Sector'].fillna('Unknown').astype(str)
+    
+    # 4. 필터링
+    # 이제 모든 값이 문자열이므로 .str 접근자가 에러를 내지 않습니다.
+    # 'nan', 'null' 등의 문자열도 걸러냅니다.
+    df = df[~df['Sector'].isin(['Unknown', 'nan', 'NaN'])] 
     df = df[~df['Sector'].str.contains('기타', na=False)]
     
-    return df
+    # 필요한 컬럼만 리턴
+    return df[required_cols]
 
 def get_top_stocks_per_sector(df, top_n=30):
     """섹터별 시가총액 상위 N개 필터링"""
