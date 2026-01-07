@@ -10,54 +10,50 @@ import concurrent.futures
 from datetime import datetime, timedelta
 
 # --- 페이지 설정 ---
-st.set_page_config(layout="wide", page_title="Pair Trading Scanner", page_icon="📈")
+st.set_page_config(layout="wide", page_title="Pair Trading Analyst")
 
-# --- 스타일 정의 (블룸버그 스타일 테마) ---
+# --- 스타일 정의 (블룸버그 다크 테마) ---
 BLOOMBERG_THEME = {
     'bgcolor': '#1e1e1e',
     'paper_bgcolor': '#121212',
     'font_color': '#e0e0e0',
     'grid_color': '#444444',
-    'line_colors': ['#ff9f1c', '#2ec4b6']  # 오렌지, 청록 (가독성 높은 대비)
+    'line_colors': ['#ff9f1c', '#2ec4b6']  # 오렌지, 청록
 }
 
 # --- 함수 정의 ---
+
 @st.cache_data
 def get_stock_list():
-    """KRX 전체 종목을 가져옵니다. (KRX 서버 차단 시 KOSPI/KOSDAQ 분리 호출로 우회)"""
+    """KRX 전체 종목 조회 (서버 차단 시 KOSPI/KOSDAQ 우회)"""
     try:
-        # 1차 시도: KRX 전체 조회 (가장 깔끔함)
         df = fdr.StockListing('KRX')
     except Exception:
-        # 2차 시도: 실패 시 KOSPI, KOSDAQ 각각 조회 후 병합 (네이버 금융 소스 활용)
+        # KRX 조회 실패 시 우회
         df_kospi = fdr.StockListing('KOSPI')
         df_kosdaq = fdr.StockListing('KOSDAQ')
         df = pd.concat([df_kospi, df_kosdaq])
     
-    # 컬럼 이름 통일 (Symbol -> Code 등 라이브러리 버전에 따른 차이 보정)
     if 'Symbol' in df.columns and 'Code' not in df.columns:
         df = df.rename(columns={'Symbol': 'Code'})
         
-    # 필요한 컬럼만 선택 및 정리
-    # 'Sector'가 없는 경우도 대비하여 에러 방지
     required_cols = ['Code', 'Name', 'Sector', 'Marcap', 'Close', 'ChgesRatio']
-    
-    # 데이터프레임에 없는 컬럼은 NaN으로 처리하여 오류 방지
     for col in required_cols:
         if col not in df.columns:
             df[col] = np.nan
 
     df = df[required_cols]
-    df = df.dropna(subset=['Sector']) # 섹터 없는 것 제거
-    df = df[~df['Sector'].str.contains('기타', na=False)] # "기타" 섹터 제외
+    df = df.dropna(subset=['Sector'])
+    df = df[~df['Sector'].str.contains('기타', na=False)]
     
     return df
+
 def get_top_stocks_per_sector(df, top_n=30):
-    """각 섹터별 시가총액 상위 N개만 필터링합니다."""
+    """섹터별 시가총액 상위 N개 필터링"""
     return df.sort_values(['Sector', 'Marcap'], ascending=[True, False]).groupby('Sector').head(top_n)
 
 def fetch_price_data_parallel(codes, days=365):
-    """병렬 처리로 주가 데이터를 빠르게 다운로드합니다."""
+    """병렬 주가 데이터 수집"""
     start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
     price_data = {}
     
@@ -68,7 +64,6 @@ def fetch_price_data_parallel(codes, days=365):
         except:
             return code, None
 
-    # ThreadPoolExecutor를 사용한 병렬 다운로드
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = [executor.submit(fetch, code) for code in codes]
         for future in concurrent.futures.as_completed(futures):
@@ -76,42 +71,29 @@ def fetch_price_data_parallel(codes, days=365):
             if series is not None:
                 price_data[code] = series
     
-    # DataFrame으로 변환 및 결측치 처리 (ffill)
     df_prices = pd.DataFrame(price_data)
-    df_prices = df_prices.fillna(method='ffill').dropna(axis=1) # 데이터가 너무 없는 종목은 제외
+    df_prices = df_prices.fillna(method='ffill').dropna(axis=1)
     return df_prices
 
 def calculate_pairs(price_df, ticker_map, min_corr=0.8, p_val_thresh=0.05):
-    """
-    1. 상관계수 > 0.8 (Fast Screening)
-    2. 공적분 검사 (Cointegration Test)
-    3. Z-score 계산
-    """
+    """상관계수 선검사 -> 공적분 검사 -> Z-Score 산출"""
     pairs = []
-    
-    # 1. 벡터화된 상관계수 계산 (고속)
     corr_matrix = price_df.corr()
-    
-    # 상부 삼각행렬만 사용하여 중복 제거 및 자기 자신 제외
     cols = corr_matrix.columns
+    
     for i in range(len(cols)):
         for j in range(i + 1, len(cols)):
             stock_a = cols[i]
             stock_b = cols[j]
             corr = corr_matrix.iloc[i, j]
             
-            # 2. 상관계수 필터링
             if corr > min_corr:
-                # 3. 공적분 검사 (Cointegration) - 무거운 작업이므로 여기서 수행
                 series_a = price_df[stock_a]
                 series_b = price_df[stock_b]
                 
-                # 로그 가격 사용 (일반적인 페어 트레이딩 관행)
                 score, pvalue, _ = coint(np.log(series_a), np.log(series_b))
                 
                 if pvalue < p_val_thresh:
-                    # Z-Score 계산을 위한 Spread 생성 (OLS 회귀)
-                    # Y = beta * X + alpha
                     x = sm.add_constant(np.log(series_b))
                     y = np.log(series_a)
                     model = sm.OLS(y, x).fit()
@@ -119,11 +101,12 @@ def calculate_pairs(price_df, ticker_map, min_corr=0.8, p_val_thresh=0.05):
                     z_score = (spread - spread.mean()) / spread.std()
                     
                     pairs.append({
-                        'Stock A': f"{ticker_map[stock_a]} ({stock_a})",
-                        'Stock B': f"{ticker_map[stock_b]} ({stock_b})",
+                        'Display': f"{ticker_map[stock_a]} - {ticker_map[stock_b]}",
+                        'Stock A': ticker_map[stock_a],
+                        'Stock B': ticker_map[stock_b],
                         'Correlation': corr,
                         'P-Value': pvalue,
-                        'Current Z-Score': z_score.iloc[-1], # 가장 최근 Z-score
+                        'Current Z-Score': z_score.iloc[-1],
                         'Code A': stock_a,
                         'Code B': stock_b,
                         'Model': model
@@ -132,14 +115,13 @@ def calculate_pairs(price_df, ticker_map, min_corr=0.8, p_val_thresh=0.05):
     return pd.DataFrame(pairs)
 
 def plot_bloomberg_style(price_df, pair_info):
-    """쌔끈한 블룸버그 스타일 차트"""
+    """차트 시각화"""
     stock_a_code = pair_info['Code A']
     stock_b_code = pair_info['Code B']
     
     series_a = np.log(price_df[stock_a_code])
     series_b = np.log(price_df[stock_b_code])
     
-    # Spread 재계산
     x = sm.add_constant(series_b)
     model = pair_info['Model']
     spread = series_a - model.predict(x)
@@ -147,31 +129,27 @@ def plot_bloomberg_style(price_df, pair_info):
 
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
                         vertical_spacing=0.05, row_heights=[0.6, 0.4],
-                        subplot_titles=("Normalized Price Performance (Log)", "Spread Z-Score"))
+                        subplot_titles=("Price Performance (Log Normalized)", "Spread Z-Score"))
 
-    # 상단: 주가 비교 (정규화하여 시작점 맞춤)
     norm_a = (series_a - series_a.iloc[0]) 
     norm_b = (series_b - series_b.iloc[0])
     
     fig.add_trace(go.Scatter(x=series_a.index, y=norm_a, mode='lines', name=pair_info['Stock A'], line=dict(color=BLOOMBERG_THEME['line_colors'][0], width=1.5)), row=1, col=1)
     fig.add_trace(go.Scatter(x=series_b.index, y=norm_b, mode='lines', name=pair_info['Stock B'], line=dict(color=BLOOMBERG_THEME['line_colors'][1], width=1.5)), row=1, col=1)
 
-    # 하단: Z-Score
     fig.add_trace(go.Scatter(x=z_score.index, y=z_score, mode='lines', name='Z-Score', line=dict(color='#ffffff', width=1)), row=2, col=1)
     
-    # Z-Score 밴드 (Entry/Exit signals)
-    fig.add_hline(y=2.0, line_dash="dot", line_color="red", row=2, col=1, annotation_text="Short Spread")
-    fig.add_hline(y=-2.0, line_dash="dot", line_color="green", row=2, col=1, annotation_text="Long Spread")
+    fig.add_hline(y=2.0, line_dash="dot", line_color="red", row=2, col=1)
+    fig.add_hline(y=-2.0, line_dash="dot", line_color="green", row=2, col=1)
     fig.add_hline(y=0, line_color="gray", row=2, col=1)
 
-    # 레이아웃 커스터마이징 (Dark Theme)
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor=BLOOMBERG_THEME['paper_bgcolor'],
         plot_bgcolor=BLOOMBERG_THEME['bgcolor'],
         font=dict(color=BLOOMBERG_THEME['font_color']),
-        height=700,
-        margin=dict(l=40, r=40, t=60, b=40),
+        height=600,
+        margin=dict(l=40, r=40, t=40, b=40),
         legend=dict(orientation="h", y=1.02, xanchor="right", x=1)
     )
     
@@ -182,36 +160,34 @@ def plot_bloomberg_style(price_df, pair_info):
 
 # --- 메인 로직 ---
 
-st.title("🐍 Quant Pair Trading Scanner")
-st.markdown("Top 30 Market Cap | High Correlation | Cointegration | Bloomberg Style Viz")
+st.title("Pair Trading Analysis")
+st.markdown("Automated Cointegration Scanner & Z-Score Analysis")
 
-# Session State 초기화
+# Session State
 if 'market_data' not in st.session_state:
     st.session_state['market_data'] = None
 if 'sector_list' not in st.session_state:
     st.session_state['sector_list'] = []
 
-# --- STEP 1: 데이터 로드 ---
-st.header("Step 1. Market Data Overview")
+# --- 섹션 1: 데이터 로드 ---
+st.subheader("1. Market Data Retrieval")
 
-if st.button("🔄 네이버(KRX) 전체 데이터 조회", type="primary"):
-    with st.spinner("데이터를 긁어오는 중입니다..."):
+if st.button("전체 종목 데이터 불러오기", type="primary"):
+    with st.spinner("KRX 데이터 조회 중..."):
         df_market = get_stock_list()
         st.session_state['market_data'] = df_market
         st.session_state['sector_list'] = df_market['Sector'].unique().tolist()
-    st.success("데이터 로드 완료!")
+    st.success(f"데이터 로드 완료. 총 {len(df_market)}개 종목.")
 
 if st.session_state['market_data'] is not None:
     df_market = st.session_state['market_data']
     
-    # 섹터별 TOP 5 보여주기
-    st.subheader("📊 Sector Top 5 Leaders (By Market Cap)")
-    
+    # 섹터별 Top 5 (Clean Table)
+    st.markdown("**Sector Top 5 (by Market Cap)**")
     top5_df = df_market.sort_values(['Sector', 'Marcap'], ascending=[True, False]).groupby('Sector').head(5)
     
-    # 깔끔한 테이블 디스플레이
     st.dataframe(
-        top5_df[['Sector', 'Name', 'Code', 'Close', 'ChgesRatio', 'Marcap']],
+        top5_df[['Sector', 'Name', 'Close', 'ChgesRatio', 'Marcap']],
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -223,52 +199,44 @@ if st.session_state['market_data'] is not None:
 
     st.divider()
 
-    # --- STEP 2: 페어 분석 ---
-    st.header("Step 2. Pair Analysis (Cointegration)")
+    # --- 섹션 2: 분석 ---
+    st.subheader("2. Pair Strategy Analysis")
     
-    col1, col2 = st.columns([1, 3])
+    col1, col2 = st.columns([1, 4])
     
     with col1:
-        selected_sector = st.selectbox("분석할 섹터를 선택하세요", st.session_state['sector_list'])
-        run_analysis = st.button("🚀 페어링 분석 실행", type="secondary")
+        selected_sector = st.selectbox("섹터 선택", st.session_state['sector_list'])
+        run_analysis = st.button("분석 실행", type="secondary")
         
     if run_analysis and selected_sector:
-        st.info(f"[{selected_sector}] 섹터 분석 시작...")
+        st.write(f"**Target:** {selected_sector} 섹터 시가총액 상위 30개 종목")
         
-        # 1. 섹터 필터링 & Top 30 선정 (Quality Filter)
+        # 필터링
         sector_stocks = df_market[df_market['Sector'] == selected_sector]
         top30_stocks = get_top_stocks_per_sector(sector_stocks, top_n=30)
         target_codes = top30_stocks['Code'].tolist()
         ticker_map = dict(zip(top30_stocks['Code'], top30_stocks['Name']))
         
-        st.write(f"👉 시가총액 상위 {len(target_codes)}개 종목 대상으로 분석합니다.")
-        
-        # 2. 병렬 데이터 다운로드 (Parallel Fetching)
-        with st.spinner("과거 데이터 병렬 다운로드 중... (Bloomberg Terminal Speed 흉내내는 중)"):
+        # 데이터 다운로드
+        with st.spinner("주가 데이터 다운로드 및 연산 중 (Parallel Fetching)..."):
             price_df = fetch_price_data_parallel(target_codes)
-        
-        # 3. 상관계수 & 공적분 검사
-        with st.spinner("상관계수 필터링 (>0.8) 및 공적분(Cointegration) 계산 중..."):
             pair_results = calculate_pairs(price_df, ticker_map)
             
         if not pair_results.empty:
-            st.success(f"총 {len(pair_results)}개의 유의미한 페어를 발견했습니다!")
+            st.success(f"Cointegration 검증 완료: {len(pair_results)}개 페어 발견")
             
-            # 결과 테이블 정렬 (P-value 낮은 순, 즉 통계적으로 가장 유의미한 순)
             pair_results = pair_results.sort_values('P-Value')
             
-            # 페어 선택 UI
-            st.subheader("Discoveries")
-            
-            # 왼쪽: 리스트 / 오른쪽: 차트
+            # UI: List & Chart
             c1, c2 = st.columns([1, 2])
             
             with c1:
-                st.caption("Cointegrated Pairs (P-value < 0.05)")
+                st.markdown("**Pairs List** (P-value < 0.05)")
                 selected_pair_idx = st.radio(
-                    "결과 리스트", 
+                    "Select a pair to visualize:", 
                     pair_results.index, 
-                    format_func=lambda x: f"{pair_results.loc[x, 'Stock A']} - {pair_results.loc[x, 'Stock B']} (Z: {pair_results.loc[x, 'Current Z-Score']:.2f})"
+                    format_func=lambda x: f"{pair_results.loc[x, 'Display']} (Z: {pair_results.loc[x, 'Current Z-Score']:.2f})",
+                    label_visibility="collapsed"
                 )
             
             with c2:
@@ -277,11 +245,11 @@ if st.session_state['market_data'] is not None:
                     fig = plot_bloomberg_style(price_df, row)
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    st.markdown(f"""
-                    **Pair Stats:**
-                    - **Correlation:** {row['Correlation']:.4f}
-                    - **Cointegration P-Value:** {row['P-Value']:.5f} (낮을수록 좋음)
-                    - **Current Z-Score:** {row['Current Z-Score']:.2f} (2.0 이상이면 벌어짐 -> 평균 회귀 기대)
-                    """)
+                    # 통계 지표 (Clean Format)
+                    st.markdown("#### Statistics")
+                    stat_col1, stat_col2, stat_col3 = st.columns(3)
+                    stat_col1.metric("Correlation", f"{row['Correlation']:.4f}")
+                    stat_col2.metric("P-Value", f"{row['P-Value']:.5f}")
+                    stat_col3.metric("Z-Score", f"{row['Current Z-Score']:.2f}")
         else:
-            st.warning("조건(Corr > 0.8, P-value < 0.05)을 만족하는 페어가 없습니다. 섹터를 변경해보세요.")
+            st.warning("조건을 만족하는 페어가 없습니다. (Correlation > 0.8, P-value < 0.05)")
