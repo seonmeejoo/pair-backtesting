@@ -58,15 +58,7 @@ def fetch_market_structure():
                 tds = tr.find_all('td')
                 if len(tds) < 2 or not tds[0].find('a'): continue
                 a = tds[0].find('a')
-                stock_name = a.text.strip()
-                stock_code = a['href'].split('code=')[-1]
-                # 종목명 옆에 코드 추가
-                all_stocks.append({
-                    'Sector': name, 
-                    'Name': f"{stock_name} ({stock_code})", 
-                    'Code': stock_code, 
-                    'Price': tds[1].text.strip()
-                })
+                all_stocks.append({'Sector': name, 'Name': a.text.strip(), 'Code': a['href'].split('code=')[-1], 'Price': tds[1].text.strip()})
             time.sleep(0.01)
         p_bar.empty()
         df = pd.merge(pd.DataFrame(all_stocks).drop_duplicates('Code'), fdr.StockListing('KRX')[['Code', 'Marcap']], on='Code', how='left').fillna(0)
@@ -82,15 +74,17 @@ def download_unit(code, start_date):
 
 @st.cache_data(ttl=3600)
 def fetch_prices_parallel(codes, start_date):
+    """병렬 다운로드 (dropna 제거로 데이터 보존)"""
     data = {}
     with ThreadPoolExecutor(max_workers=10) as executor:
         future_to_code = {executor.submit(download_unit, c, start_date): c for c in codes}
         for future in as_completed(future_to_code):
             code, res = future.result()
             if res is not None: data[code] = res
-    return pd.DataFrame(data)
+    return pd.DataFrame(data) # 🚨 여기서 dropna()를 절대 하지 않음
 
 def analyze_pairs_refined(price_df, stocks_info, p_thresh, z_thresh, corr_limit):
+    """페어별 개별 정렬 분석 엔진"""
     results = []
     sectors = stocks_info['Sector'].unique()
     
@@ -100,32 +94,28 @@ def analyze_pairs_refined(price_df, stocks_info, p_thresh, z_thresh, corr_limit)
         if len(codes) < 2: continue
         
         for s1, s2 in combinations(codes, 2):
+            # 🚨 [핵심] 두 종목만 따로 떼어내서 날짜를 맞춤
             pair_data = price_df[[s1, s2]].dropna()
             if len(pair_data) < 30: continue 
             
+            # 1차 상관계수 필터
             corr = pair_data[s1].corr(pair_data[s2])
             if corr < corr_limit: continue
             
             try:
+                # 2차 공적분 검정 (로그 가격 모델)
                 y, x = np.log(pair_data[s1]), np.log(pair_data[s2])
                 score, p_val, _ = coint(y, x)
                 
                 if p_val < p_thresh:
                     model = sm.OLS(y, sm.add_constant(x)).fit()
-                    hedge_ratio = model.params.iloc[1]
-                    spread = y - (hedge_ratio * x)
+                    spread = y - (model.params.iloc[1] * x)
                     z = (spread.iloc[-1] - spread.mean()) / spread.std()
                     
-                    # 결과 리스트 내 종목명 옆에 코드 추가
-                    name1_raw = sec_stocks[sec_stocks['Code']==s1]['Name'].values[0]
-                    name2_raw = sec_stocks[sec_stocks['Code']==s2]['Name'].values[0]
-
                     results.append({
-                        'Sector': sector, 
-                        'Stock1': name1_raw, # 이미 (코드)가 포함된 이름
-                        'Stock2': name2_raw, 
-                        'Code1': s1, 'Code2': s2, 
-                        'Correlation': corr, 'P_value': p_val, 'Current_Z': z, 'Spread': spread
+                        'Sector': sector, 'Stock1': sec_stocks[sec_stocks['Code']==s1]['Name'].values[0],
+                        'Stock2': sec_stocks[sec_stocks['Code']==s2]['Name'].values[0],
+                        'Code1': s1, 'Code2': s2, 'Correlation': corr, 'P_value': p_val, 'Current_Z': z, 'Spread': spread
                     })
             except: continue
     return pd.DataFrame(results)
@@ -140,7 +130,7 @@ if 'm_df' not in st.session_state: st.session_state.m_df = None
 if 'p_df' not in st.session_state: st.session_state.p_df = None
 
 # Step 1
-st.header("Step 1. 시장 데이터 스캔")
+st.header("1. 시장 데이터 스캔")
 if st.button("전체 종목 조회", type="primary"):
     st.session_state.m_df = fetch_market_structure()
 
@@ -152,7 +142,7 @@ if st.session_state.m_df is not None:
 st.divider()
 
 # Step 2
-st.header("Step 2. 분석 대상 및 주가 데이터")
+st.header("2. 분석 대상 및 주가 데이터")
 if st.session_state.m_df is not None:
     mode = st.radio("분석 모드", ["전체 섹터 (섹터별 시총 상위 30개)", "특정 섹터 집중 (선택 섹터 전 종목)"])
     lookback = st.slider("조회 기간 (일)", 30, 365, 60)
@@ -167,7 +157,7 @@ if st.session_state.m_df is not None:
     if st.button("주가 다운로드 시작"):
         if not target.empty:
             start = (datetime.now() - timedelta(days=lookback)).strftime('%Y-%m-%d')
-            with st.spinner("데이터 다운로드 중..."):
+            with st.spinner("고속 병렬 다운로드 중..."):
                 st.session_state.p_df = fetch_prices_parallel(target['Code'].tolist(), start)
                 st.session_state.target_info = target
             st.success(f"{len(st.session_state.p_df.columns)}개 종목 로드 완료")
@@ -175,10 +165,10 @@ if st.session_state.m_df is not None:
 st.divider()
 
 # Step 3
-st.header("Step 3. 페어 분석 및 전략 실행")
+st.header("3. 페어 분석 및 전략 실행")
 if st.session_state.p_df is not None:
     c1, c2, c3 = st.columns(3)
-    p_crit = c1.number_input("Max P-value", 0.01, 0.5, 0.1)
+    p_crit = c1.number_input("Max P-value (Cointegration)", 0.01, 0.5, 0.1)
     z_crit = c2.number_input("Z-Score Threshold", 1.0, 5.0, 2.0)
     corr_crit = c3.slider("Min Correlation", 0.5, 0.99, 0.8)
     
@@ -189,47 +179,30 @@ if st.session_state.p_df is not None:
 
     if 'res' in st.session_state and not st.session_state.res.empty:
         results = st.session_state.res
-        tab1, tab2 = st.tabs(["진입 시그널", "전체 Watchlist"])
+        tab1, tab2 = st.tabs(["🔥 진입 시그널", "🔍 전체 Watchlist"])
         
         def draw_bloomberg(pair):
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
-            
-            # 차트용 데이터 인덱스 정렬
-            valid_idx = pair['Spread'].index
-            p1 = (st.session_state.p_df[pair['Code1']].loc[valid_idx] / st.session_state.p_df[pair['Code1']].loc[valid_idx].iloc[0] - 1) * 100
-            p2 = (st.session_state.p_df[pair['Code2']].loc[valid_idx] / st.session_state.p_df[pair['Code2']].loc[valid_idx].iloc[0] - 1) * 100
-            
-            ax1.plot(p1, color='#00ffcc', label=pair['Stock1'])
-            ax1.plot(p2, color='#ff00ff', label=pair['Stock2'])
-            ax1.set_title(f"Returns: {pair['Stock1']} vs {pair['Stock2']}")
-            ax1.legend(facecolor='#1e1e1e')
-            ax1.grid(True, alpha=0.3)
-            
+            p1 = (st.session_state.p_df[pair['Code1']].loc[pair['Spread'].index] / st.session_state.p_df[pair['Code1']].loc[pair['Spread'].index].iloc[0] - 1) * 100
+            p2 = (st.session_state.p_df[pair['Code2']].loc[pair['Spread'].index] / st.session_state.p_df[pair['Code2']].loc[pair['Spread'].index].iloc[0] - 1) * 100
+            ax1.plot(p1, color='#00ffcc', label=pair['Stock1']); ax1.plot(p2, color='#ff00ff', label=pair['Stock2'])
+            ax1.set_title(f"Returns: {pair['Stock1']} vs {pair['Stock2']}"); ax1.legend(); ax1.grid(True, alpha=0.3)
             z_s = (pair['Spread'] - pair['Spread'].mean()) / pair['Spread'].std()
-            ax2.plot(z_s, color='#ffff00', label='Spread Z-Score')
-            ax2.axhline(z_crit, color='red', ls='--')
-            ax2.axhline(-z_crit, color='red', ls='--')
+            ax2.plot(z_s, color='#ffff00'); ax2.axhline(z_crit, color='red', ls='--'); ax2.axhline(-z_crit, color='red', ls='--')
             ax2.fill_between(z_s.index, z_crit, z_s, where=(z_s>=z_crit), color='red', alpha=0.3)
             ax2.fill_between(z_s.index, -z_crit, z_s, where=(z_s<=-z_crit), color='red', alpha=0.3)
-            ax2.set_title(f"Z-Score Spread: {pair['Current_Z']:.2f} (P-val: {pair['P_value']:.4f})")
-            ax2.legend(facecolor='#1e1e1e')
-            ax2.grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            st.pyplot(fig)
+            ax2.set_title(f"Z-Score Spread: {pair['Current_Z']:.2f}"); ax2.grid(True, alpha=0.3)
+            plt.tight_layout(); st.pyplot(fig)
 
         with tab1:
             sig = results[abs(results['Current_Z']) >= z_crit]
             if not sig.empty:
                 st.dataframe(sig[['Sector', 'Stock1', 'Stock2', 'Correlation', 'Current_Z', 'P_value']], use_container_width=True, hide_index=True)
-                sel = st.selectbox("시그널 차트 선택", sig.index, format_func=lambda x: f"{sig.loc[x, 'Stock1']} - {sig.loc[x, 'Stock2']}", key="sig_box")
+                sel = st.selectbox("시그널 차트", sig.index, format_func=lambda x: f"{sig.loc[x, 'Stock1']} - {sig.loc[x, 'Stock2']}")
                 draw_bloomberg(sig.loc[sel])
-            else: st.info("현재 기준을 충족하는 진입 시그널이 없습니다.")
-            
+            else: st.info("현재 기준 충족 페어 없음")
         with tab2:
             st.dataframe(results[['Sector', 'Stock1', 'Stock2', 'Correlation', 'Current_Z', 'P_value']], use_container_width=True, hide_index=True)
-            sel_w = st.selectbox("관심 페어 차트 선택", results.index, format_func=lambda x: f"{results.loc[x, 'Stock1']} - {results.loc[x, 'Stock2']}", key="watch_box")
+            sel_w = st.selectbox("관심 페어 차트", results.index, format_func=lambda x: f"{results.loc[x, 'Stock1']} - {results.loc[x, 'Stock2']}")
             draw_bloomberg(results.loc[sel_w])
-            
-    elif 'res' in st.session_state:
-        st.warning("분석 결과 조건을 만족하는 페어가 없습니다.")
+    elif 'res' in st.session_state: st.warning("발견된 페어 없음")
