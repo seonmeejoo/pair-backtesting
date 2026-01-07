@@ -14,7 +14,7 @@ import os
 import time
 
 # ==========================================
-# 0. 환경 및 스타일 설정 (Bloomberg Style)
+# 0. 시스템 설정 및 시각화 테마
 # ==========================================
 def init_settings():
     font_path = "NanumGothic.ttf"
@@ -47,11 +47,12 @@ def init_settings():
 init_settings()
 
 # ==========================================
-# 1. 데이터 수집 및 가공 함수
+# 1. 핵심 데이터 처리 엔진
 # ==========================================
+
 @st.cache_data(ttl=3600*12)
 def fetch_all_market_data():
-    """네이버 업종별 전체 종목 수집 및 시가총액 매핑"""
+    """네이버 금융 업종별 데이터 전체 수집 및 시총 매핑"""
     base_url = "https://finance.naver.com/sise/sise_group.naver?type=upjong"
     headers = {'User-Agent': 'Mozilla/5.0'}
     
@@ -96,21 +97,20 @@ def fetch_all_market_data():
         df_krx = fdr.StockListing('KRX')[['Code', 'Marcap']]
         df = pd.merge(df_naver, df_krx, on='Code', how='left').fillna(0)
         
-        # 시가총액 포맷팅
         def format_m(v):
             v = int(v)
             jo = v // 1000000000000
             uk = (v % 1000000000000) // 100000000
             return f"{jo}조 {uk}억" if jo > 0 else f"{uk}억"
             
-        df['Market Cap Value'] = df['Marcap'] # 정렬용 숫자
+        df['Market Cap Value'] = df['Marcap']
         df['Market Cap'] = df['Marcap'].apply(format_m)
         return df.sort_values(['Sector', 'Market Cap Value'], ascending=[True, False])
     except: return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def fetch_prices(codes, start_date):
-    """주가 데이터 병렬 수집 (딕셔너리 구조)"""
+    """병렬 구조 주가 데이터 수집"""
     data = {}
     p_bar = st.progress(0)
     for i, code in enumerate(codes):
@@ -122,13 +122,12 @@ def fetch_prices(codes, start_date):
     p_bar.empty()
     return pd.DataFrame(data).dropna()
 
-def analyze_pairs(price_df, stocks_info, p_thresh, z_thresh, corr_limit=0.8):
-    """상관계수 선검사 후 공적분 분석 실행"""
+def analyze_pairs(price_df, stocks_info, p_thresh, z_thresh, corr_limit):
+    """상관계수 선별 후 공적분 정밀 분석"""
     results = []
-    # 1. 상관계수 행렬 선계산 (Vectorized)
     corr_matrix = price_df.corr()
-    
     sectors = stocks_info['Sector'].unique()
+    
     for sector in sectors:
         sec_stocks = stocks_info[stocks_info['Sector'] == sector]
         codes = [c for c in sec_stocks['Code'] if c in price_df.columns]
@@ -136,7 +135,7 @@ def analyze_pairs(price_df, stocks_info, p_thresh, z_thresh, corr_limit=0.8):
         if len(codes) < 2: continue
         
         for s1, s2 in combinations(codes, 2):
-            # 2. Fast Screening: 상관계수 0.8 미만은 공적분 검사 생략
+            # 상관계수 선검사 (분석 속도 최적화)
             if corr_matrix.loc[s1, s2] < corr_limit: continue
             
             try:
@@ -161,96 +160,90 @@ def analyze_pairs(price_df, stocks_info, p_thresh, z_thresh, corr_limit=0.8):
     return pd.DataFrame(results)
 
 # ==========================================
-# 2. 메인 UI 및 실행 로직
+# 2. 메인 화면 구성
 # ==========================================
 st.set_page_config(page_title="Pair Scanner Terminal", layout="wide")
 
 if 'market_df' not in st.session_state: st.session_state.market_df = None
 if 'price_df' not in st.session_state: st.session_state.price_df = None
 
-# --- Step 1: 시장 전체 데이터 조회 ---
-st.header("1. 시장 데이터 스캔 및 업종별 현황")
-if st.button("전체 종목 및 섹터 조회", type="primary"):
-    with st.spinner("네이버 금융 데이터 수집 중..."):
+st.title("Pair Scanner Terminal")
+st.write("섹터 내 상관관계를 분석하여 통계적 차익거래 기회를 탐색합니다.")
+
+# --- Step 1: 시장 데이터 스캔 ---
+st.header("Step 1. 시장 데이터 스캔")
+if st.button("전체 종목 및 섹터 정보 조회", type="primary"):
+    with st.spinner("섹터 및 종목 정보를 수집하고 있습니다..."):
         st.session_state.market_df = fetch_all_market_data()
 
 if st.session_state.market_df is not None:
     df = st.session_state.market_df
-    st.success(f"스캔 완료: {df['Sector'].nunique()}개 섹터 (기타 제외)")
+    st.success(f"데이터 스캔 완료: {df['Sector'].nunique()}개 섹터 확보")
     
-    with st.expander("섹터별 시가총액 TOP 5 리스트 확인"):
-        top5_display = df.groupby('Sector').head(5)
-        st.dataframe(top5_display[['Sector', 'Name', 'Price', 'Market Cap']], use_container_width=True, hide_index=True)
+    with st.expander("섹터별 시가총액 상위 5개 종목 미리보기"):
+        top5_view = df.groupby('Sector').head(5)
+        st.dataframe(top5_view[['Sector', 'Name', 'Price', 'Market Cap']], use_container_width=True, hide_index=True)
 
 st.divider()
 
-# --- Step 2: 분석 준비 (Top 30 필터링 및 다운로드) ---
-st.header("2. 분석 데이터 준비 (섹터별 상위 30개)")
+# --- Step 2: 전체 섹터 데이터 준비 ---
+st.header("Step 2. 전체 섹터 데이터 수집")
 if st.session_state.market_df is not None:
-    all_sectors = st.session_state.market_df['Sector'].unique().tolist()
-    selected_sectors = st.multiselect("분석할 섹터 선택", all_sectors, default=all_sectors[:2])
-    lookback = st.slider("데이터 조회 기간 (일)", 30, 200, 60)
+    st.write("모든 섹터의 시가총액 상위 30개 종목을 분석 대상으로 설정합니다.")
+    lookback = st.slider("데이터 조회 기간 (일 단위)", 30, 200, 60)
     
-    if st.button("주가 데이터 다운로드"):
-        # 섹터별 상위 30개 필터링 (Quality Filter)
-        target_info = st.session_state.market_df[st.session_state.market_df['Sector'].isin(selected_sectors)]
-        target_info = target_info.groupby('Sector').head(30)
-        
+    if st.button("전체 섹터 주가 데이터 다운로드", type="secondary"):
+        # 전체 섹터별 상위 30개 추출
+        target_info = st.session_state.market_df.groupby('Sector').head(30)
         start_date = (datetime.now() - timedelta(days=lookback)).strftime('%Y-%m-%d')
-        with st.spinner(f"{len(target_info)}개 종목 주가 다운로드 중..."):
+        
+        with st.spinner(f"전체 섹터 {len(target_info)}개 종목 데이터를 다운로드 중입니다..."):
             st.session_state.price_df = fetch_prices(target_info['Code'].tolist(), start_date)
             st.session_state.target_info = target_info
-        st.success(f"{len(st.session_state.price_df.columns)}개 종목 데이터 준비 완료")
+        st.success(f"데이터 준비 완료: {len(st.session_state.price_df.columns)}개 종목 분석 가능")
 
 st.divider()
 
-# --- Step 3: 전략 실행 및 시각화 ---
-st.header("3. 페어 분석 및 전략 실행")
+# --- Step 3: 분석 및 시각화 ---
+st.header("Step 3. 페어 분석 및 전략 도출")
 if st.session_state.price_df is not None:
-    col1, col2, col3 = st.columns(3)
-    p_thresh = col1.number_input("Max P-value (공적분 기준)", 0.01, 0.2, 0.10, 0.01)
-    z_thresh = col2.number_input("Z-Score Threshold (진입 기준)", 1.0, 4.0, 2.0, 0.1)
-    corr_min = col3.slider("최소 상관계수 (Pre-screening)", 0.5, 0.95, 0.8)
+    c1, c2, c3 = st.columns(3)
+    p_thresh = c1.number_input("최대 P-value (통계적 유의성)", 0.01, 0.2, 0.10)
+    z_thresh = c2.number_input("Z-Score 진입 기준", 1.0, 4.0, 2.0)
+    corr_min = c3.slider("최소 상관계수 (사전 필터)", 0.5, 0.95, 0.8)
     
     if st.button("분석 실행", type="primary"):
-        with st.spinner("통계 연산 중..."):
+        with st.spinner("공적분 연산 및 페어 트레이딩 시그널 탐색 중..."):
             results = analyze_pairs(st.session_state.price_df, st.session_state.target_info, p_thresh, z_thresh, corr_min)
             st.session_state.results = results
             
     if 'results' in st.session_state and not st.session_state.results.empty:
         res = st.session_state.results
-        st.subheader(f"발견된 페어: {len(res)}건")
+        st.subheader(f"분석 결과: {len(res)}개의 페어 식별됨")
         
-        tab1, tab2 = st.tabs(["🔥 실시간 시그널", "🔍 전체 Watchlist"])
+        tab1, tab2 = st.tabs(["실시간 진입 시그널", "전체 관심 종목"])
         
         def draw_chart(pair):
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
-            
-            # 1. 주가 차트 (누적 수익률)
+            # 수익률 비교 차트
             p1 = (st.session_state.price_df[pair['Code1']] / st.session_state.price_df[pair['Code1']].iloc[0] - 1) * 100
             p2 = (st.session_state.price_df[pair['Code2']] / st.session_state.price_df[pair['Code2']].iloc[0] - 1) * 100
-            
             ax1.plot(p1, color='#00ffcc', label=pair['Stock1'])
             ax1.plot(p2, color='#ff00ff', label=pair['Stock2'])
             ax1.set_title(f"Cumulative Returns: {pair['Stock1']} vs {pair['Stock2']}")
-            ax1.legend(facecolor='#1e1e1e', edgecolor='#444444')
+            ax1.legend(facecolor='#1e1e1e')
             ax1.grid(True, alpha=0.3)
             
-            # 2. Z-Score 차트 (변수명 수정 완료)
-            # 계산된 변수명 z_series를 아래 plot 함수에서 동일하게 사용합니다.
+            # Z-Score 스프레드 차트
             z_series = (pair['Spread'] - pair['Spread'].mean()) / pair['Spread'].std()
-            
             ax2.plot(z_series, color='#ffff00', label='Spread Z-Score')
             ax2.axhline(z_thresh, color='red', linestyle='--')
             ax2.axhline(-z_thresh, color='red', linestyle='--')
             ax2.axhline(0, color='gray', alpha=0.5)
-            
-            # 진입 구간 색상 채우기
-            ax2.fill_between(z_series.index, z_thresh, z_series, where=(z_series >= z_thresh), color='red', alpha=0.3)
-            ax2.fill_between(z_series.index, -z_thresh, z_series, where=(z_series <= -z_thresh), color='red', alpha=0.3)
-            
+            ax2.fill_between(z_series.index, z_thresh, z_series, where=(z_series>=z_thresh), color='red', alpha=0.3)
+            ax2.fill_between(z_series.index, -z_thresh, z_series, where=(z_series<=-z_thresh), color='red', alpha=0.3)
             ax2.set_title(f"Z-Score Spread (Current: {pair['Current_Z']:.2f})")
-            ax2.legend(facecolor='#1e1e1e', edgecolor='#444444')
+            ax2.legend(facecolor='#1e1e1e')
             ax2.grid(True, alpha=0.3)
             
             plt.tight_layout()
@@ -260,15 +253,15 @@ if st.session_state.price_df is not None:
             sig = res[abs(res['Current_Z']) >= z_thresh]
             if not sig.empty:
                 st.dataframe(sig[['Sector', 'Stock1', 'Stock2', 'Correlation', 'Current_Z', 'P_value']], use_container_width=True, hide_index=True)
-                sel = st.selectbox("상세 차트 확인 (Signal)", sig.index, format_func=lambda x: f"{sig.loc[x, 'Stock1']} - {sig.loc[x, 'Stock2']}")
+                sel = st.selectbox("상세 차트 선택 (Signal)", sig.index, format_func=lambda x: f"{sig.loc[x, 'Stock1']} - {sig.loc[x, 'Stock2']}")
                 draw_chart(sig.loc[sel])
-            else: st.info("현재 진입 기준을 충족하는 페어가 없습니다.")
+            else: st.info("현재 진입 기준에 도달한 페어가 없습니다.")
 
         with tab2:
             st.dataframe(res[['Sector', 'Stock1', 'Stock2', 'Correlation', 'Current_Z', 'P_value']], use_container_width=True, hide_index=True)
-            sel_w = st.selectbox("상세 차트 확인 (Watchlist)", res.index, format_func=lambda x: f"{res.loc[x, 'Stock1']} - {res.loc[x, 'Stock2']}")
+            sel_w = st.selectbox("상세 차트 선택 (Watchlist)", res.index, format_func=lambda x: f"{res.loc[x, 'Stock1']} - {res.loc[x, 'Stock2']}")
             draw_chart(res.loc[sel_w])
     elif 'results' in st.session_state:
-        st.warning("분석 결과 유효한 페어가 없습니다. 조건을 완화해보세요.")
+        st.warning("유효한 페어를 찾지 못했습니다. 상관계수나 P-value 기준을 조정해 보십시오.")
 else:
-    st.info("2단계에서 데이터를 먼저 다운로드해주세요.")
+    st.info("Step 2에서 전체 섹터 주가 데이터를 먼저 준비해 주십시오.")
