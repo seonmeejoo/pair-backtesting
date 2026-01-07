@@ -235,7 +235,7 @@ st.divider()
 # -------------------------------------------------------------------
 # [STEP 2] Data Prep (섹터 선택 & 가격 다운로드)
 # -------------------------------------------------------------------
-st.header("2️⃣ Data Preparation (Download)")
+st.header("2️⃣ Stock Price Download")
 
 if st.session_state.step1_data is not None:
     raw_df = st.session_state.step1_data
