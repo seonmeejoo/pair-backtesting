@@ -144,12 +144,12 @@ st.divider()
 # Step 2
 st.header("2. 분석 대상 및 주가 데이터")
 if st.session_state.m_df is not None:
-    mode = st.radio("분석 모드", ["전체 섹터 (섹터별 시총 상위 30개)", "특정 섹터 집중 (선택 섹터 전 종목)"])
+    mode = st.radio("분석 모드", ["전체 섹터 (섹터별 시총 상위 10개)", "특정 섹터 집중 (선택 섹터 전 종목)"])
     lookback = st.slider("조회 기간 (일)", 30, 365, 60)
     
     target = pd.DataFrame()
-    if mode == "전체 섹터 (섹터별 시총 상위 30개)":
-        target = st.session_state.m_df.groupby('Sector').head(30)
+    if mode == "전체 섹터 (섹터별 시총 상위 10개)":
+        target = st.session_state.m_df.groupby('Sector').head(10)
     else:
         sel = st.multiselect("섹터 선택", st.session_state.m_df['Sector'].unique())
         if sel: target = st.session_state.m_df[st.session_state.m_df['Sector'].isin(sel)]
