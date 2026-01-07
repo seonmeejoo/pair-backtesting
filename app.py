@@ -221,7 +221,7 @@ with col_2:
         st.info("Start by scanning the market.")
 
 if st.session_state.step1_data is not None:
-    with st.expander("📂 Market Leaders Overview (Top 5)", expanded=False):
+    with st.expander("📂 Market Overview (Top 5)", expanded=False):
         raw_df = st.session_state.step1_data
         sector_counts = raw_df['Sector'].value_counts().reset_index()
         sector_counts.columns = ['Sector', 'Count']
@@ -286,7 +286,7 @@ st.divider()
 # -------------------------------------------------------------------
 # [STEP 3] Statistical Analysis (파라미터 설정 & 분석)
 # -------------------------------------------------------------------
-st.header("3️⃣ Strategy Execution (Find Pairs)")
+st.header("3️⃣ Find Pairs")
 
 if st.session_state.step2_price is not None:
     # 파라미터 튜닝 패널
